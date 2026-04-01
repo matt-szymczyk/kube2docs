@@ -1,0 +1,48 @@
+[project]
+name = "cluster-explorer"
+version = "0.1.0"
+description = "AI agent that reverse-engineers Kubernetes workloads into operational knowledge"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "kubernetes>=31.0",
+    "litellm>=1.50",
+    "pydantic>=2.9",
+    "jinja2>=3.1",
+    "rich>=13.9",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+cluster-explorer = "explorer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/explorer"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
