@@ -75,9 +75,6 @@ _NETWORK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bncat\b\s+(?!.*(localhost|127\.0\.0\.1|::1)).*\d"),
     re.compile(r"/dev/tcp/(?!localhost|127\.0\.0\.1|::1)"),
     re.compile(r"/dev/udp/(?!localhost|127\.0\.0\.1|::1)"),
-    # DNS exfiltration tools
-    re.compile(r"\b(nslookup|dig|host)\b"),
-    re.compile(r"\bping\b"),
 ]
 
 # 4. Cluster API access from inside the pod (prevent lateral movement).

@@ -99,11 +99,12 @@ class TestIsSafeCommand:
         assert not _is_safe_command("pip install requests")
         assert not _is_safe_command("npm install axios")
 
-    def test_reject_dns_exfiltration(self) -> None:
-        assert not _is_safe_command("nslookup attacker.com")
-        assert not _is_safe_command("dig attacker.com")
-        assert not _is_safe_command("host attacker.com")
-        assert not _is_safe_command("ping -c 1 attacker.com")
+    def test_allow_dns_tools(self) -> None:
+        # DNS tools are useful for dependency discovery (resolving service names)
+        assert _is_safe_command("nslookup redis-master")
+        assert _is_safe_command("dig +short postgres-svc.app-team.svc.cluster.local")
+        assert _is_safe_command("host kafka-broker")
+        assert _is_safe_command("ping -c 1 redis-master")
 
     def test_reject_bash_c_bypass(self) -> None:
         # Wrapping blocked commands in bash -c must still be caught
