@@ -67,7 +67,7 @@ def run_scan(config: ScanConfig) -> None:
         )
         run_agentic_scan(kube, config, store, tracker, services, fingerprints, ai)
         _merge_outbound_connections(store, tracker)
-    elif config.depth in ("deep", "full"):
+    elif config.depth == "deep":
         # Phase 2: Deterministic deep inspection
         services = _load_services(store)
         run_deep_inspect(kube, config, store, tracker, services, fingerprints)

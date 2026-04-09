@@ -26,6 +26,22 @@ from kube2docs.security.hasher import hash_value
 logger = logging.getLogger(__name__)
 
 
+def _resolve_namespaces(requested: list[str], available: list[str]) -> list[str]:
+    """Match requested namespaces against those available in the cluster.
+
+    Warns about each missing namespace and exits if none match.
+    """
+    target: list[str] = []
+    for ns in requested:
+        if ns in available:
+            target.append(ns)
+        else:
+            logger.warning("Requested namespace %r not found in cluster — skipping", ns)
+    if not target:
+        raise SystemExit(f"None of the requested namespaces exist: {requested}")
+    return target
+
+
 def run_survey(
     kube: KubeClient,
     config: ScanConfig,
@@ -39,7 +55,7 @@ def run_survey(
     # 1. Discover namespaces
     all_ns = kube.list_namespaces()
     if config.namespaces:
-        target_ns = [ns for ns in config.namespaces if ns in all_ns]
+        target_ns = _resolve_namespaces(config.namespaces, all_ns)
     else:
         target_ns = [ns for ns in all_ns if not config.is_namespace_excluded(ns)]
 

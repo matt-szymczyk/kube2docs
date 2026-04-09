@@ -26,7 +26,7 @@ uv venv && uv pip install -e ".[dev]"
 
 ```bash
 # Scan the cluster
-kube2docs scan --kubeconfig ~/.kube/config --output ./kb/
+kube2docs scan --output ./kb/
 
 # Generate docs
 export OPENROUTER_API_KEY=...

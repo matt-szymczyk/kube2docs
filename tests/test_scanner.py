@@ -1,7 +1,27 @@
 """Tests for scanner helpers."""
 
+import pytest
+
 from kube2docs.knowledge.schemas import DependencyEdge
+from kube2docs.phases.survey import _resolve_namespaces
 from kube2docs.scanner import _parse_connection_destination, _render_mermaid_topology
+
+
+class TestResolveNamespaces:
+    """Tests for namespace resolution against cluster state."""
+
+    def test_all_match(self) -> None:
+        result = _resolve_namespaces(["app-team", "batch-jobs"], ["app-team", "batch-jobs", "kube-system"])
+        assert result == ["app-team", "batch-jobs"]
+
+    def test_partial_match_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        result = _resolve_namespaces(["app-team", "nonexistent"], ["app-team", "kube-system"])
+        assert result == ["app-team"]
+        assert "nonexistent" in caplog.text
+
+    def test_no_match_exits(self) -> None:
+        with pytest.raises(SystemExit, match="None of the requested namespaces exist"):
+            _resolve_namespaces(["foo", "bar"], ["app-team"])
 
 
 class TestParseConnectionDestination:
