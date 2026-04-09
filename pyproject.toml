@@ -1,19 +1,37 @@
 [project]
-name = "cluster-explorer"
+name = "kube2docs"
 version = "0.1.0"
-description = "AI agent that reverse-engineers Kubernetes workloads into operational knowledge"
+description = "Crawl a Kubernetes cluster and produce structured operational knowledge"
 readme = "README.md"
 license = { text = "MIT" }
+authors = [{ name = "Mateusz Szymczyk" }]
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
     "kubernetes>=31.0",
     "litellm>=1.50",
     "pydantic>=2.9",
-    "jinja2>=3.1",
     "rich>=13.9",
-    "pyyaml>=6.0",
 ]
+keywords = ["kubernetes", "documentation", "k8s", "cluster", "observability", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Clustering",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Documentation",
+]
+
+[project.urls]
+Homepage = "https://github.com/matt-szymczyk/kube2docs"
+Repository = "https://github.com/matt-szymczyk/kube2docs"
+Issues = "https://github.com/matt-szymczyk/kube2docs/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -24,14 +42,23 @@ dev = [
 ]
 
 [project.scripts]
-cluster-explorer = "explorer.cli:main"
+kube2docs = "kube2docs.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/explorer"]
+packages = ["src/kube2docs"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/kube2docs",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -43,6 +70,10 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["kubernetes.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

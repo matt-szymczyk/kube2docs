@@ -10,5 +10,7 @@ build/
 .venv/
 .env
 kb/
+docs/
 output/
-explorer-status.json
+kube2docs-status.json
+.claude/worktrees/
