@@ -7,6 +7,7 @@ here — it is reserved for the writer/interpretation layer.
 import json
 import logging
 import re
+import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -375,7 +376,7 @@ def _try_read_config_files(
             output = pod_exec.run_safe(
                 namespace,
                 pod_name,
-                f"ls {glob_path} 2>/dev/null",
+                f"ls {shlex.quote(glob_path)} 2>/dev/null",
                 container,
                 timeout=5,
             )
@@ -389,7 +390,7 @@ def _try_read_config_files(
             content = pod_exec.run_safe(
                 namespace,
                 pod_name,
-                f"cat {fpath} 2>/dev/null",
+                f"cat {shlex.quote(fpath)} 2>/dev/null",
                 container,
                 timeout=5,
             )
@@ -572,9 +573,10 @@ def _extract_config_paths_from_cmdline(ps_output: str) -> list[str]:
     if not cmdline:
         cmdline = ps_output  # fallback: scan all output
 
-    # Look for absolute paths with config-like extensions
-    # Match: --flag /path/to/file.yaml, -f /path/to/file.conf, or bare /path/to/file.toml
-    path_pattern = re.compile(r"(/[^\s:,;\"']+)")
+    # Look for absolute paths with config-like extensions.
+    # Only allow safe path characters (alphanumeric, /, ., -, _) to prevent
+    # shell injection via crafted cmdline args like --config '/app/foo$(rm -rf /)'.
+    path_pattern = re.compile(r"(/[a-zA-Z0-9_./-]+)")
     for match in path_pattern.finditer(cmdline):
         candidate = match.group(1)
         # Check if it has a config-like extension

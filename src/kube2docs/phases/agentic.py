@@ -75,6 +75,9 @@ _NETWORK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bncat\b\s+(?!.*(localhost|127\.0\.0\.1|::1)).*\d"),
     re.compile(r"/dev/tcp/(?!localhost|127\.0\.0\.1|::1)"),
     re.compile(r"/dev/udp/(?!localhost|127\.0\.0\.1|::1)"),
+    # DNS exfiltration tools
+    re.compile(r"\b(nslookup|dig|host)\b"),
+    re.compile(r"\bping\b"),
 ]
 
 # 4. Cluster API access from inside the pod (prevent lateral movement).
@@ -419,8 +422,16 @@ def _run_agentic_loop(
 
 
 def _is_safe_command(command: str) -> bool:
-    """Check if a command is safe to execute (read-only)."""
-    return all(not pattern.search(command) for pattern in _DANGEROUS_PATTERNS)
+    """Check if a command is safe to execute (read-only).
+
+    Also validates inner commands in shell wrappers like ``bash -c '...'``
+    and ``sh -c '...'`` to prevent bypassing the blocklist via nesting.
+    """
+    if any(pattern.search(command) for pattern in _DANGEROUS_PATTERNS):
+        return False
+    # Recursively check shell -c wrappers to prevent bypass via nesting.
+    inner_match = re.search(r"\b(?:ba)?sh\s+-c\s+['\"](.+?)['\"]", command)
+    return not (inner_match and any(pattern.search(inner_match.group(1)) for pattern in _DANGEROUS_PATTERNS))
 
 
 # Allowed keys in profile_updates. Used for validation + retry when the LLM
