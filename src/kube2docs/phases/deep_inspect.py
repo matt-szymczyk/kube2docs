@@ -193,7 +193,10 @@ def run_deep_inspect(
                 (raw_dir / f"{label}.txt").write_text(output)
 
         if not any_succeeded:
-            tracker.warning(f"{ns}/{name}: no exec commands succeeded in any container")
+            tracker.warning(
+                f"{ns}/{name}: no exec commands succeeded in any container"
+                " (try --agentic for distroless images)"
+            )
             completed += 1
             continue
 

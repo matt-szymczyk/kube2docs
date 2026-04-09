@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: kube2docs
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: Szymczyk
+    given-names: Mateusz
+repository-code: https://github.com/matt-szymczyk/kube2docs
+license: MIT
+version: 0.1.1
+date-released: "2026-04-09"
+keywords:
+  - kubernetes
+  - documentation
+  - cluster
+  - observability
+  - llm

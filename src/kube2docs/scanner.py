@@ -107,8 +107,13 @@ def _print_dry_run_summary(config: ScanConfig, store: KnowledgeStore, tracker: P
         else:
             tracker.log("Cost estimate unavailable — pricing unknown for this model")
     else:
+        from kube2docs.phases.deep_inspect import _DISCOVERY_COMMANDS
+
         tracker.log("")
         tracker.log("Deterministic deep inspect: free (no LLM calls)")
+        tracker.log("Commands that would be exec'd into each container:")
+        for label, cmd in _DISCOVERY_COMMANDS:
+            tracker.log(f"  [{label}] {cmd}")
 
     tracker.log("")
     tracker.log("Remove --dry-run to execute the scan.")
