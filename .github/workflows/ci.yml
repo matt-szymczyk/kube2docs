@@ -16,10 +16,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: uv pip install -e ".[dev]" pytest-cov
+        run: uv pip install --system -e ".[dev]"
       - name: Run tests with coverage
-        run: uv run pytest --cov=kube2docs --cov-report=xml --cov-report=term
+        run: pytest --cov=kube2docs --cov-report=xml --cov-report=term
       - name: Lint
-        run: uv run ruff check src/
+        run: ruff check src/
       - name: Type check
-        run: uv run mypy src/kube2docs/
+        run: mypy src/kube2docs/
