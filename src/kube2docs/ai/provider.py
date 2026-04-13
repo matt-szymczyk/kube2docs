@@ -6,6 +6,7 @@ import threading
 from typing import Any, cast
 
 import litellm
+from litellm.exceptions import AuthenticationError, RateLimitError, Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,15 @@ class AIProvider:
             with self._lock:
                 self.calls_used += 1
             return cast(str, response.choices[0].message.content.strip())
+        except AuthenticationError:
+            logger.error("AI authentication failed for model=%s — check your API key", self.model)
+            return None
+        except RateLimitError:
+            logger.warning("AI rate limit hit for model=%s", self.model)
+            return None
+        except Timeout:
+            logger.warning("AI call timed out after %ds for model=%s", self.timeout, self.model)
+            return None
         except Exception:
             logger.warning("AI call failed for model=%s", self.model, exc_info=True)
             return None
@@ -135,6 +145,15 @@ class AIProvider:
             with self._lock:
                 self.calls_used += 1
             text = cast(str, response.choices[0].message.content.strip())
+        except AuthenticationError:
+            logger.error("AI authentication failed for model=%s — check your API key", self.model)
+            return None
+        except RateLimitError:
+            logger.warning("AI rate limit hit for model=%s", self.model)
+            return None
+        except Timeout:
+            logger.warning("AI call timed out after %ds for model=%s", self.timeout, self.model)
+            return None
         except Exception:
             logger.warning("AI call failed for model=%s", self.model, exc_info=True)
             return None

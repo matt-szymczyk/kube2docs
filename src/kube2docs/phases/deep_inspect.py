@@ -182,6 +182,7 @@ def run_deep_inspect(
                 tracker=tracker,
                 store=store,
                 container_name=container,
+                max_configs_per_glob=config.config_files_per_glob,
             )
 
             # Write raw outputs per container for debugging
@@ -194,14 +195,14 @@ def run_deep_inspect(
 
         if not any_succeeded:
             tracker.warning(
-                f"{ns}/{name}: no exec commands succeeded in any container"
-                " (try --agentic for distroless images)"
+                f"{ns}/{name}: no exec commands succeeded in any container (try --agentic for distroless images)"
             )
             completed += 1
             continue
 
-        # Bump confidence
+        # Bump confidence and record inspection source
         profile.confidence = min(0.7, profile.confidence + 0.3)
+        profile.inspection_source = "deep_inspect"
         profile.explored_at = datetime.now(UTC)
 
         # Write updated profile
@@ -239,6 +240,7 @@ def _enrich_profile(
     tracker: ProgressTracker,
     store: KnowledgeStore | None = None,
     container_name: str | None = None,
+    max_configs_per_glob: int = 5,
 ) -> None:
     """Update a profile with deep inspection findings."""
 
@@ -346,6 +348,7 @@ def _enrich_profile(
         container=container,
         configs_dir=configs_dir,
         extra_paths=extra_config_paths,
+        max_per_glob=max_configs_per_glob,
     )
 
     # --- Health endpoint probing ---
@@ -369,6 +372,7 @@ def _try_read_config_files(
     container: str | None,
     configs_dir: Path | None = None,
     extra_paths: list[str] | None = None,
+    max_per_glob: int = 5,
 ) -> None:
     """Attempt to read known config file paths and save raw contents."""
     all_globs: list[str] = list(_CONFIG_GLOBS)
@@ -389,7 +393,7 @@ def _try_read_config_files(
         else:
             paths = [glob_path]
 
-        for fpath in paths[:5]:  # Limit per glob
+        for fpath in paths[:max_per_glob]:
             content = pod_exec.run_safe(
                 namespace,
                 pod_name,

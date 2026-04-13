@@ -1,6 +1,7 @@
 """kube2docs CLI entry point."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,11 @@ def scan(**kwargs: Any) -> None:
 
     if kwargs.get("agentic") and not kwargs.get("model"):
         click.echo("Error: --model is required when using --agentic", err=True)
+        raise SystemExit(1)
+
+    output_path = Path(kwargs["output"])
+    if output_path.exists() and not os.access(output_path, os.W_OK):
+        click.echo(f"Error: output directory {output_path} is not writable", err=True)
         raise SystemExit(1)
 
     config = ScanConfig(

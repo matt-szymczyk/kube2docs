@@ -410,8 +410,8 @@ def _load_overview(input_dir: Path) -> ClusterOverview | None:
     if path.exists():
         try:
             return ClusterOverview(**json.loads(path.read_text()))
-        except Exception:
-            return None
+        except Exception as exc:
+            logger.warning("Failed to load cluster overview from %s: %s", path, exc)
     return None
 
 
@@ -472,6 +472,7 @@ def _load_json_list(path: Path) -> list[Any]:
             data = json.loads(path.read_text())
             if isinstance(data, list):
                 return data
-        except Exception:
-            pass
+            logger.warning("Expected a JSON list in %s, got %s", path, type(data).__name__)
+        except Exception as exc:
+            logger.warning("Failed to load JSON list from %s: %s", path, exc)
     return []

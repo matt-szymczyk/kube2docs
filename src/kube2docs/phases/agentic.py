@@ -227,8 +227,9 @@ def run_agentic_scan(
             tracker=tracker,
         )
 
-        # Bump confidence
+        # Bump confidence and record inspection source
         profile.confidence = min(0.9, profile.confidence + 0.6)
+        profile.inspection_source = "agentic"
         profile.explored_at = datetime.now(UTC)
 
         # Write updated profile

@@ -78,6 +78,7 @@ class WorkloadProfile(BaseModel):
     workload_type: str
     explored_at: datetime
     confidence: float = 0.0
+    inspection_source: Literal["survey", "deep_inspect", "agentic"] = "survey"
     containers: list[ContainerInfo]
     init_containers: list[ContainerInfo] = Field(default_factory=list)
     image_fingerprint: dict[str, str] = Field(default_factory=dict)

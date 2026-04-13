@@ -63,6 +63,7 @@ class ScanConfig:
     agentic_max_rounds: int = 5
     agentic_max_execs: int = 20
     agentic_max_calls: int = 200
+    config_files_per_glob: int = 5
     _excluded_namespaces: frozenset[str] = field(default_factory=lambda: SYSTEM_NAMESPACES)
 
     def is_namespace_excluded(self, namespace: str) -> bool:

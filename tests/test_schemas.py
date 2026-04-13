@@ -102,6 +102,7 @@ class TestWorkloadProfile:
         assert wp.api_version == "kube2docs.io/v1alpha1"
         assert wp.kind == "WorkloadProfile"
         assert wp.confidence == 0.0
+        assert wp.inspection_source == "survey"
         assert wp.replicas == 1
         assert wp.network_listeners == []
         assert wp.outbound_connections == []
@@ -113,6 +114,29 @@ class TestWorkloadProfile:
         assert wp.resource_observed is None
         assert wp.health == {}
         assert wp.failure_modes == []
+
+    def test_inspection_source_valid_values(self):
+        for source in ("survey", "deep_inspect", "agentic"):
+            wp = WorkloadProfile(
+                name="x",
+                namespace="ns",
+                workload_type="Deployment",
+                explored_at=NOW,
+                containers=[ContainerInfo(name="c", role="main", image="i")],
+                inspection_source=source,
+            )
+            assert wp.inspection_source == source
+
+    def test_inspection_source_invalid_raises(self):
+        with pytest.raises(ValidationError):
+            WorkloadProfile(
+                name="x",
+                namespace="ns",
+                workload_type="Deployment",
+                explored_at=NOW,
+                containers=[ContainerInfo(name="c", role="main", image="i")],
+                inspection_source="manual",  # type: ignore[arg-type]
+            )
 
     def test_roundtrip_json(self):
         wp = WorkloadProfile(
