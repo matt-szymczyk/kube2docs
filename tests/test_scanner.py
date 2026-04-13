@@ -2,8 +2,8 @@
 
 import pytest
 
-from kube2docs.knowledge.schemas import DependencyEdge
-from kube2docs.phases.survey import _resolve_namespaces
+from kube2docs.knowledge.schemas import DependencyEdge, RbacRule, RbacSummary
+from kube2docs.phases.survey import _detect_high_risk, _resolve_namespaces, _resolve_rbac
 from kube2docs.scanner import _parse_connection_destination, _render_mermaid_topology
 
 
@@ -65,6 +65,121 @@ class TestParseConnectionDestination:
         label, port = _parse_connection_destination("")
         assert label == ""
         assert port == 0
+
+
+class TestDetectHighRisk:
+    """Tests for RBAC high-risk rule detection."""
+
+    def test_cluster_admin(self) -> None:
+        rules = [RbacRule(verbs=["*"], resources=["*"])]
+        assert _detect_high_risk(rules) == ["*:*"]
+
+    def test_secret_read(self) -> None:
+        rules = [RbacRule(verbs=["get", "list"], resources=["secrets"])]
+        flags = _detect_high_risk(rules)
+        assert len(flags) == 1
+        assert "secrets:" in flags[0]
+        assert "get" in flags[0]
+        assert "list" in flags[0]
+
+    def test_pod_exec(self) -> None:
+        rules = [RbacRule(verbs=["create"], resources=["pods/exec"])]
+        assert _detect_high_risk(rules) == ["pods/exec:create"]
+
+    def test_pod_attach(self) -> None:
+        rules = [RbacRule(verbs=["create"], resources=["pods/attach"])]
+        assert _detect_high_risk(rules) == ["pods/attach:create"]
+
+    def test_clusterrole_escalation(self) -> None:
+        rules = [RbacRule(verbs=["bind", "escalate"], resources=["clusterroles"])]
+        flags = _detect_high_risk(rules)
+        assert any("clusterroles:" in f for f in flags)
+
+    def test_safe_rules_produce_no_flags(self) -> None:
+        rules = [RbacRule(verbs=["get", "list"], resources=["pods", "services"])]
+        assert _detect_high_risk(rules) == []
+
+    def test_deduplication(self) -> None:
+        # Two rules granting secret access — should not duplicate the flag
+        rules = [
+            RbacRule(verbs=["get"], resources=["secrets"]),
+            RbacRule(verbs=["get"], resources=["secrets"]),
+        ]
+        flags = _detect_high_risk(rules)
+        assert flags.count(flags[0]) == 1
+
+
+class TestResolveRbac:
+    """Tests for per-workload RBAC resolution."""
+
+    def _make_indices(
+        self,
+        ns_roles: dict[str, list[RbacRule]] | None = None,
+        cluster_roles: dict[str, list[RbacRule]] | None = None,
+        rb_index: dict[str, list[tuple[str, str, str]]] | None = None,
+        crb_index: dict[tuple[str, str], list[tuple[str, str]]] | None = None,
+    ) -> tuple[
+        dict[str, list[RbacRule]],
+        dict[str, list[RbacRule]],
+        dict[str, list[tuple[str, str, str]]],
+        dict[tuple[str, str], list[tuple[str, str]]],
+    ]:
+        return (
+            ns_roles or {},
+            cluster_roles or {},
+            rb_index or {},
+            crb_index or {},
+        )
+
+    def test_no_bindings_returns_empty_summary(self) -> None:
+        ns_roles, cluster_roles, rb_index, crb_index = self._make_indices()
+        result = _resolve_rbac("default", "app", ns_roles, cluster_roles, rb_index, crb_index)
+        assert isinstance(result, RbacSummary)
+        assert result.service_account == "default"
+        assert result.roles == []
+        assert result.rules == []
+        assert result.high_risk == []
+
+    def test_namespaced_role_binding(self) -> None:
+        rules = [RbacRule(verbs=["get", "list"], resources=["pods"])]
+        ns_roles, cluster_roles, rb_index, crb_index = self._make_indices(
+            ns_roles={"pod-reader": rules},
+            rb_index={"my-sa": [("Role", "pod-reader", "pod-reader-binding")]},
+        )
+        result = _resolve_rbac("my-sa", "ns", ns_roles, cluster_roles, rb_index, crb_index)
+        assert "role/pod-reader" in result.roles
+        assert len(result.rules) == 1
+        assert result.high_risk == []
+
+    def test_cluster_role_binding(self) -> None:
+        admin_rules = [RbacRule(verbs=["*"], resources=["*"])]
+        ns_roles, cluster_roles, rb_index, crb_index = self._make_indices(
+            cluster_roles={"cluster-admin": admin_rules},
+            crb_index={("operator-sa", "ops"): [("cluster-admin", "operator-crb")]},
+        )
+        result = _resolve_rbac("operator-sa", "ops", ns_roles, cluster_roles, rb_index, crb_index)
+        assert "clusterrole/cluster-admin" in result.roles
+        assert result.high_risk == ["*:*"]
+
+    def test_role_binding_referencing_cluster_role(self) -> None:
+        view_rules = [RbacRule(verbs=["get", "list", "watch"], resources=["deployments"])]
+        ns_roles, cluster_roles, rb_index, crb_index = self._make_indices(
+            cluster_roles={"view": view_rules},
+            rb_index={"app-sa": [("ClusterRole", "view", "view-binding")]},
+        )
+        result = _resolve_rbac("app-sa", "ns", ns_roles, cluster_roles, rb_index, crb_index)
+        assert "clusterrole/view" in result.roles
+        assert len(result.rules) == 1
+
+    def test_deduplicates_roles(self) -> None:
+        rules = [RbacRule(verbs=["get"], resources=["pods"])]
+        ns_roles, cluster_roles, rb_index, crb_index = self._make_indices(
+            ns_roles={"reader": rules},
+            rb_index={"sa": [("Role", "reader", "rb1"), ("Role", "reader", "rb2")]},
+        )
+        result = _resolve_rbac("sa", "ns", ns_roles, cluster_roles, rb_index, crb_index)
+        # Two bindings to same role — roles list should deduplicate
+        assert result.roles.count("role/reader") == 1
 
 
 class TestRenderMermaidTopology:

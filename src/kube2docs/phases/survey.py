@@ -14,6 +14,8 @@ from kube2docs.knowledge.schemas import (
     ContainerInfo,
     DependencyEdge,
     EnvVar,
+    RbacRule,
+    RbacSummary,
     ResilienceInfo,
     VolumeInfo,
     WorkloadProfile,
@@ -84,6 +86,11 @@ def run_survey(
     tracker.start("survey", total_workloads)
     completed = 0
 
+    # Collect cluster-scoped RBAC data once (ClusterRoles + ClusterRoleBindings)
+    cluster_roles, crb_index = _collect_cluster_rbac(kube)
+    if cluster_roles:
+        logger.debug("Loaded %d ClusterRoles for RBAC analysis", len(cluster_roles))
+
     for ns in target_ns:
         tracker.log(f"Scanning namespace: {ns}")
 
@@ -120,6 +127,9 @@ def run_survey(
         # ConfigMaps and Secrets (for reference lookup)
         configmaps = {cm.metadata.name: cm for cm in kube.list_configmaps(ns)}
         secrets = {s.metadata.name: s for s in kube.list_secrets(ns)}
+
+        # RBAC: namespaced Roles and RoleBindings
+        ns_roles, rb_index = _collect_namespace_rbac(kube, ns)
 
         # PVCs
         pvcs = {pvc.metadata.name: pvc for pvc in kube.list_pvcs(ns)}
@@ -223,6 +233,10 @@ def run_survey(
                     pdb_selectors=pdb_selectors,
                     pod_node_map=pod_node_map,
                     service_registry=service_registry,
+                    ns_roles=ns_roles,
+                    cluster_roles=cluster_roles,
+                    rb_index=rb_index,
+                    crb_index=crb_index,
                 )
                 all_profiles.append(profile)
 
@@ -380,6 +394,10 @@ def _build_profile(
     pdb_selectors: list[dict[str, Any]],
     pod_node_map: dict[str, list[str]],
     service_registry: dict[str, dict[str, Any]],
+    ns_roles: dict[str, list[RbacRule]],
+    cluster_roles: dict[str, list[RbacRule]],
+    rb_index: dict[str, list[tuple[str, str, str]]],
+    crb_index: dict[tuple[str, str], list[tuple[str, str]]],
 ) -> WorkloadProfile:
     meta = item.metadata
     pod_spec = _get_pod_spec(item, wl_type)
@@ -412,8 +430,9 @@ def _build_profile(
     health = _extract_health_probes(pod_spec.containers)
 
     # Resilience
-    labels: dict[str, str] = {}
-    if wl_type != "CronJob":
+    if wl_type == "CronJob":
+        labels: dict[str, str] = item.spec.job_template.spec.template.metadata.labels or {}
+    else:
         labels = item.spec.template.metadata.labels or {}
 
     resilience = _build_resilience(
@@ -426,6 +445,15 @@ def _build_profile(
         pod_node_map=pod_node_map,
     )
 
+    # CronJob-specific metadata
+    cron_schedule = item.spec.schedule if wl_type == "CronJob" else None
+    cron_suspend = item.spec.suspend if wl_type == "CronJob" else None
+    cron_concurrency_policy = item.spec.concurrency_policy if wl_type == "CronJob" else None
+
+    # RBAC
+    sa_name: str = pod_spec.service_account_name or ""
+    rbac = _resolve_rbac(sa_name, namespace, ns_roles, cluster_roles, rb_index, crb_index) if sa_name else None
+
     return WorkloadProfile(
         name=meta.name,
         namespace=namespace,
@@ -436,12 +464,16 @@ def _build_profile(
         init_containers=init_containers,
         image_fingerprint=image_fp,
         replicas=_get_replicas(item, wl_type),
+        cron_schedule=cron_schedule,
+        cron_suspend=cron_suspend,
+        cron_concurrency_policy=cron_concurrency_policy,
         env_vars=env_vars,
         volumes=volumes,
         secrets_referenced=secrets_ref,
         resource_requested=resource_requested,
         health=health,
         resilience=resilience,
+        rbac=rbac,
     )
 
 
@@ -675,6 +707,138 @@ def _build_resilience(
         topology_spread=has_topology_spread,
         all_replicas_same_node=all_same_node,
         horizontal_pod_autoscaler=has_hpa,
+    )
+
+
+def _rules_from_k8s(rules: list[Any] | None) -> list[RbacRule]:
+    """Convert Kubernetes policy rules to RbacRule models."""
+    result: list[RbacRule] = []
+    for r in rules or []:
+        result.append(
+            RbacRule(
+                verbs=list(r.verbs or []),
+                api_groups=list(r.api_groups or []),
+                resources=list(r.resources or []),
+                resource_names=list(r.resource_names or []),
+                non_resource_urls=list(getattr(r, "non_resource_ur_ls", None) or []),
+            )
+        )
+    return result
+
+
+def _detect_high_risk(rules: list[RbacRule]) -> list[str]:
+    """Return human-readable flags for elevated or dangerous RBAC permissions."""
+    flags: list[str] = []
+    for rule in rules:
+        verbs = set(rule.verbs)
+        resources = set(rule.resources)
+        if "*" in verbs and "*" in resources:
+            flags.append("*:*")
+            continue
+        if "secrets" in resources and verbs & {"get", "list", "watch", "*"}:
+            matched = sorted(verbs & {"get", "list", "watch", "*"})
+            flags.append(f"secrets:{','.join(matched)}")
+        for subres in ("pods/exec", "pods/attach"):
+            if subres in resources and "create" in verbs:
+                flags.append(f"{subres}:create")
+        if "clusterroles" in resources and verbs & {"bind", "escalate", "*"}:
+            matched = sorted(verbs & {"bind", "escalate", "*"})
+            flags.append(f"clusterroles:{','.join(matched)}")
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(flags))
+
+
+def _collect_cluster_rbac(
+    kube: KubeClient,
+) -> tuple[dict[str, list[RbacRule]], dict[tuple[str, str], list[tuple[str, str]]]]:
+    """Load ClusterRoles and ClusterRoleBindings.
+
+    Returns:
+        cluster_roles: {cluster_role_name -> [rules]}
+        crb_index:     {(sa_name, sa_namespace) -> [(cluster_role_name, binding_name)]}
+    """
+    cluster_roles: dict[str, list[RbacRule]] = {}
+    crb_index: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    try:
+        for cr in kube.list_cluster_roles():
+            cluster_roles[cr.metadata.name] = _rules_from_k8s(cr.rules)
+    except ApiException as exc:
+        logger.debug("Cannot list ClusterRoles (RBAC denied?): %s", exc.reason)
+        return cluster_roles, crb_index
+    try:
+        for crb in kube.list_cluster_role_bindings():
+            cr_name = crb.role_ref.name
+            binding_name = crb.metadata.name
+            for subject in crb.subjects or []:
+                if subject.kind == "ServiceAccount" and subject.name and subject.namespace:
+                    key = (subject.name, subject.namespace)
+                    crb_index.setdefault(key, []).append((cr_name, binding_name))
+    except ApiException as exc:
+        logger.debug("Cannot list ClusterRoleBindings (RBAC denied?): %s", exc.reason)
+    return cluster_roles, crb_index
+
+
+def _collect_namespace_rbac(
+    kube: KubeClient,
+    namespace: str,
+) -> tuple[dict[str, list[RbacRule]], dict[str, list[tuple[str, str, str]]]]:
+    """Load Roles and RoleBindings for one namespace.
+
+    Returns:
+        ns_roles:  {role_name -> [rules]}
+        rb_index:  {sa_name -> [(role_kind, role_name, binding_name)]}
+    """
+    ns_roles: dict[str, list[RbacRule]] = {}
+    rb_index: dict[str, list[tuple[str, str, str]]] = {}
+    try:
+        for role in kube.list_roles(namespace):
+            ns_roles[role.metadata.name] = _rules_from_k8s(role.rules)
+    except ApiException as exc:
+        logger.debug("Cannot list Roles in %s (RBAC denied?): %s", namespace, exc.reason)
+        return ns_roles, rb_index
+    try:
+        for rb in kube.list_role_bindings(namespace):
+            role_kind = rb.role_ref.kind
+            role_name = rb.role_ref.name
+            binding_name = rb.metadata.name
+            for subject in rb.subjects or []:
+                if subject.kind == "ServiceAccount" and subject.name:
+                    rb_index.setdefault(subject.name, []).append((role_kind, role_name, binding_name))
+    except ApiException as exc:
+        logger.debug("Cannot list RoleBindings in %s (RBAC denied?): %s", namespace, exc.reason)
+    return ns_roles, rb_index
+
+
+def _resolve_rbac(
+    sa_name: str,
+    namespace: str,
+    ns_roles: dict[str, list[RbacRule]],
+    cluster_roles: dict[str, list[RbacRule]],
+    rb_index: dict[str, list[tuple[str, str, str]]],
+    crb_index: dict[tuple[str, str], list[tuple[str, str]]],
+) -> RbacSummary:
+    """Resolve effective RBAC rules for a ServiceAccount."""
+    all_rules: list[RbacRule] = []
+    role_refs: list[str] = []
+
+    for role_kind, role_name, _binding in rb_index.get(sa_name, []):
+        if role_kind == "Role":
+            rules = ns_roles.get(role_name, [])
+            role_refs.append(f"role/{role_name}")
+        else:  # ClusterRole referenced via namespaced RoleBinding
+            rules = cluster_roles.get(role_name, [])
+            role_refs.append(f"clusterrole/{role_name}")
+        all_rules.extend(rules)
+
+    for cr_name, _binding in crb_index.get((sa_name, namespace), []):
+        all_rules.extend(cluster_roles.get(cr_name, []))
+        role_refs.append(f"clusterrole/{cr_name}")
+
+    return RbacSummary(
+        service_account=sa_name,
+        roles=list(dict.fromkeys(role_refs)),
+        rules=all_rules,
+        high_risk=_detect_high_risk(all_rules),
     )
 
 

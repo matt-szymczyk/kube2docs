@@ -11,6 +11,7 @@ from kubernetes.client import (
     CoreV1Api,
     NetworkingV1Api,
     PolicyV1Api,
+    RbacAuthorizationV1Api,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class KubeClient:
         self.networking = NetworkingV1Api()
         self.autoscaling = AutoscalingV1Api()
         self.policy = PolicyV1Api()
+        self.rbac = RbacAuthorizationV1Api()
 
     # --- Namespace ---
 
@@ -93,6 +95,20 @@ class KubeClient:
 
     def list_pdbs(self, namespace: str) -> list[Any]:
         return self.policy.list_namespaced_pod_disruption_budget(namespace).items  # type: ignore[no-any-return]
+
+    # --- RBAC ---
+
+    def list_roles(self, namespace: str) -> list[Any]:
+        return self.rbac.list_namespaced_role(namespace).items  # type: ignore[no-any-return]
+
+    def list_role_bindings(self, namespace: str) -> list[Any]:
+        return self.rbac.list_namespaced_role_binding(namespace).items  # type: ignore[no-any-return]
+
+    def list_cluster_roles(self) -> list[Any]:
+        return self.rbac.list_cluster_role().items  # type: ignore[no-any-return]
+
+    def list_cluster_role_bindings(self) -> list[Any]:
+        return self.rbac.list_cluster_role_binding().items  # type: ignore[no-any-return]
 
     # --- Nodes ---
 

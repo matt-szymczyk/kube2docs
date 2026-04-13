@@ -12,6 +12,8 @@ from kube2docs.knowledge.schemas import (
     EnvVar,
     NetworkListener,
     OutboundConnection,
+    RbacRule,
+    RbacSummary,
     ScanStatus,
     WorkloadProfile,
 )
@@ -167,6 +169,119 @@ class TestWorkloadProfile:
         assert "api_version" in data
         assert "kind" in data
         assert data["replicas"] == 1
+
+
+class TestRbacRule:
+    def test_create_minimal(self):
+        rule = RbacRule(verbs=["get", "list"])
+        assert rule.verbs == ["get", "list"]
+        assert rule.api_groups == []
+        assert rule.resources == []
+        assert rule.resource_names == []
+        assert rule.non_resource_urls == []
+
+    def test_roundtrip_json(self):
+        rule = RbacRule(
+            verbs=["create", "delete"],
+            api_groups=["apps"],
+            resources=["deployments"],
+        )
+        parsed = RbacRule.model_validate_json(rule.model_dump_json())
+        assert parsed == rule
+
+
+class TestRbacSummary:
+    def test_create_no_permissions(self):
+        s = RbacSummary(service_account="default")
+        assert s.roles == []
+        assert s.rules == []
+        assert s.high_risk == []
+
+    def test_create_with_high_risk(self):
+        s = RbacSummary(
+            service_account="operator",
+            roles=["clusterrole/cluster-admin"],
+            rules=[RbacRule(verbs=["*"], resources=["*"])],
+            high_risk=["*:*"],
+        )
+        assert s.high_risk == ["*:*"]
+
+    def test_roundtrip_json(self):
+        s = RbacSummary(
+            service_account="my-sa",
+            roles=["role/reader", "clusterrole/view"],
+            rules=[RbacRule(verbs=["get", "list"], resources=["pods"])],
+            high_risk=[],
+        )
+        parsed = RbacSummary.model_validate_json(s.model_dump_json())
+        assert parsed == s
+
+
+class TestWorkloadProfileRbacAndCron:
+    def test_cron_fields_default_none(self):
+        wp = WorkloadProfile(
+            name="web",
+            namespace="ns",
+            workload_type="Deployment",
+            explored_at=NOW,
+            containers=[ContainerInfo(name="c", role="main", image="i")],
+        )
+        assert wp.cron_schedule is None
+        assert wp.cron_suspend is None
+        assert wp.cron_concurrency_policy is None
+        assert wp.rbac is None
+
+    def test_cron_fields_populated(self):
+        wp = WorkloadProfile(
+            name="nightly-job",
+            namespace="batch",
+            workload_type="CronJob",
+            explored_at=NOW,
+            containers=[ContainerInfo(name="worker", role="main", image="job:1.0")],
+            replicas=0,
+            cron_schedule="0 2 * * *",
+            cron_suspend=False,
+            cron_concurrency_policy="Forbid",
+        )
+        assert wp.cron_schedule == "0 2 * * *"
+        assert wp.cron_suspend is False
+        assert wp.cron_concurrency_policy == "Forbid"
+
+    def test_rbac_field_populated(self):
+        rbac = RbacSummary(
+            service_account="my-sa",
+            roles=["role/reader"],
+            rules=[RbacRule(verbs=["get"], resources=["pods"])],
+        )
+        wp = WorkloadProfile(
+            name="api",
+            namespace="ns",
+            workload_type="Deployment",
+            explored_at=NOW,
+            containers=[ContainerInfo(name="c", role="main", image="i")],
+            rbac=rbac,
+        )
+        assert wp.rbac is not None
+        assert wp.rbac.service_account == "my-sa"
+        assert wp.rbac.high_risk == []
+
+    def test_roundtrip_with_rbac_and_cron(self):
+        wp = WorkloadProfile(
+            name="cron-job",
+            namespace="batch",
+            workload_type="CronJob",
+            explored_at=NOW,
+            containers=[ContainerInfo(name="w", role="main", image="job:2.0")],
+            replicas=0,
+            cron_schedule="*/15 * * * *",
+            cron_concurrency_policy="Allow",
+            rbac=RbacSummary(service_account="batch-sa", high_risk=["secrets:get,list"]),
+        )
+        parsed = WorkloadProfile.model_validate_json(wp.model_dump_json())
+        assert parsed == wp
+        assert parsed.cron_schedule == "*/15 * * * *"
+        assert parsed.rbac is not None
+        assert parsed.rbac.high_risk == ["secrets:get,list"]
 
 
 class TestClusterOverview:

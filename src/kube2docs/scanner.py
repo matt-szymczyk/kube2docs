@@ -88,20 +88,25 @@ def _print_dry_run_summary(config: ScanConfig, store: KnowledgeStore, tracker: P
         except (json.JSONDecodeError, ValueError, OSError):
             continue
 
-    # CronJobs are skipped by both Phase 2 and Phase 3.
-    scannable = [p for p in profiles if p.workload_type != "CronJob"]
+    # Phase 2/3 exec requires a running pod; CronJob pods only exist mid-run,
+    # so they are listed but noted separately.
+    execable = [p for p in profiles if p.workload_type != "CronJob"]
+    cron_profiles = [p for p in profiles if p.workload_type == "CronJob"]
 
     tracker.log("")
-    tracker.log(
-        f"Dry run — would scan {len(scannable)} workloads (skipping {len(profiles) - len(scannable)} CronJobs):"
-    )
-    for p in scannable:
+    tracker.log(f"Dry run — {len(profiles)} workloads profiled:")
+    for p in execable:
         tracker.log(f"  - {p.namespace}/{p.name} ({p.workload_type})")
+    if cron_profiles:
+        tracker.log("  CronJobs (survey only — exec skipped when no active pod):")
+        for p in cron_profiles:
+            sched = f"  schedule={p.cron_schedule}" if p.cron_schedule else ""
+            tracker.log(f"    - {p.namespace}/{p.name}{sched}")
 
     if config.agentic:
         from kube2docs.phases.agentic import _estimate_cost
 
-        estimate = _estimate_cost(config.agentic_model or "", len(scannable))
+        estimate = _estimate_cost(config.agentic_model or "", len(execable))
         tracker.log("")
         tracker.log(f"Agentic scan: model={config.agentic_model}, max budget={config.agentic_max_calls} calls")
         if estimate is not None:

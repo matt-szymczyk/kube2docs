@@ -70,6 +70,23 @@ class FailureMode(BaseModel):
     time_to_impact: str | None = None
 
 
+class RbacRule(BaseModel):
+    verbs: list[str]
+    api_groups: list[str] = Field(default_factory=list)
+    resources: list[str] = Field(default_factory=list)
+    resource_names: list[str] = Field(default_factory=list)
+    non_resource_urls: list[str] = Field(default_factory=list)
+
+
+class RbacSummary(BaseModel):
+    service_account: str
+    roles: list[str] = Field(default_factory=list)
+    rules: list[RbacRule] = Field(default_factory=list)
+    # Human-readable flags for rules that grant elevated or dangerous permissions.
+    # Format: "resource:verbs" e.g. "secrets:get,list" or "*:*"
+    high_risk: list[str] = Field(default_factory=list)
+
+
 class WorkloadProfile(BaseModel):
     api_version: str = "kube2docs.io/v1alpha1"
     kind: str = "WorkloadProfile"
@@ -83,6 +100,10 @@ class WorkloadProfile(BaseModel):
     init_containers: list[ContainerInfo] = Field(default_factory=list)
     image_fingerprint: dict[str, str] = Field(default_factory=dict)
     replicas: int = 1
+    # CronJob-specific metadata (None for non-CronJob workloads)
+    cron_schedule: str | None = None
+    cron_suspend: bool | None = None
+    cron_concurrency_policy: str | None = None
     network_listeners: list[NetworkListener] = Field(default_factory=list)
     outbound_connections: list[OutboundConnection] = Field(default_factory=list)
     env_vars: list[EnvVar] = Field(default_factory=list)
@@ -95,6 +116,7 @@ class WorkloadProfile(BaseModel):
     health: dict[str, Any] = Field(default_factory=dict)
     resilience: ResilienceInfo = Field(default_factory=ResilienceInfo)
     failure_modes: list[FailureMode] = Field(default_factory=list)
+    rbac: RbacSummary | None = None
     summary: str | None = None
 
 
