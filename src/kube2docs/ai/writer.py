@@ -410,7 +410,7 @@ def _load_overview(input_dir: Path) -> ClusterOverview | None:
     if path.exists():
         try:
             return ClusterOverview(**json.loads(path.read_text()))
-        except Exception as exc:
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
             logger.warning("Failed to load cluster overview from %s: %s", path, exc)
     return None
 
@@ -420,7 +420,7 @@ def _load_profiles(input_dir: Path) -> list[WorkloadProfile]:
     for path in input_dir.rglob("*.profile.json"):
         try:
             profiles.append(WorkloadProfile(**json.loads(path.read_text())))
-        except Exception as exc:
+        except (json.JSONDecodeError, ValueError, OSError) as exc:
             logger.warning("Skipping %s: %s", path, exc)
     return profiles
 
@@ -438,6 +438,7 @@ def _load_raw_configs(input_dir: Path, profile: WorkloadProfile) -> str:
         content = config_file.read_text()
         original_path = "/" + config_file.name.replace("__", "/")
         if len(content) > 4000:
+            logger.debug("Truncating %s from %d to 4000 chars for AI prompt", config_file.name, len(content))
             content = content[:4000] + "\n... [truncated]"
         parts.append(f"### {original_path}\n```\n{content}\n```")
 

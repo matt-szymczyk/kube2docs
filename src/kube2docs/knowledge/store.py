@@ -35,7 +35,11 @@ class KnowledgeStore:
         logger.debug("Wrote %s", path)
 
     def read_json(self, path: Path) -> dict[str, Any] | list[Any] | None:
-        """Read JSON data, returning None if file doesn't exist."""
+        """Read JSON data, returning None if file doesn't exist or is malformed."""
         if not path.exists():
             return None
-        return json.loads(path.read_text())  # type: ignore[no-any-return]
+        try:
+            return json.loads(path.read_text())  # type: ignore[no-any-return]
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to read %s: %s", path, exc)
+            return None
