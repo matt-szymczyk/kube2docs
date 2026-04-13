@@ -28,9 +28,18 @@ def main() -> None:
 @click.option("--reveal-configmap-values", is_flag=True, default=False, help="Show ConfigMap values in plaintext")
 @click.option("--timeout", default=300, type=click.IntRange(min=1), help="Per-operation timeout in seconds")
 @click.option("--dry-run", is_flag=True, default=False, help="Survey only, print commands that would run, then exit")
-@click.option("--agentic", is_flag=True, default=False, help="Use AI-driven Phase 3 instead of Phase 2")
+@click.option("--agentic", is_flag=True, default=False, help="Use LLM-driven inspection instead of deterministic exec")
 @click.option("--model", default=None, help="Model for agentic scan (required with --agentic)")
-@click.option("--api-key", envvar="OPENROUTER_API_KEY", default=None, help="API key for agentic scan")
+@click.option(
+    "--api-key",
+    default=None,
+    help="API key for agentic scan (falls back to provider env var: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)",
+)
+@click.option(
+    "--api-base",
+    default=None,
+    help="Override API base URL (e.g. http://localhost:11434 for Ollama, self-hosted vLLM/LM Studio)",
+)
 @click.option("--max-calls", default=200, type=click.IntRange(min=1), help="Global LLM call budget for agentic scan")
 @click.option("--max-rounds", default=5, type=click.IntRange(min=1), help="Max LLM rounds per workload in agentic mode")
 def scan(**kwargs: Any) -> None:
@@ -39,14 +48,9 @@ def scan(**kwargs: Any) -> None:
     if kwargs.get("namespaces"):
         ns_list = [n.strip() for n in kwargs["namespaces"].split(",")]
 
-    if kwargs.get("agentic"):
-        if not kwargs.get("model"):
-            click.echo("Error: --model is required when using --agentic", err=True)
-            raise SystemExit(1)
-        # Dry run doesn't execute LLM calls, so the API key is optional.
-        if not kwargs.get("dry_run") and not kwargs.get("api_key"):
-            click.echo("Error: --api-key is required when using --agentic (or set OPENROUTER_API_KEY)", err=True)
-            raise SystemExit(1)
+    if kwargs.get("agentic") and not kwargs.get("model"):
+        click.echo("Error: --model is required when using --agentic", err=True)
+        raise SystemExit(1)
 
     config = ScanConfig(
         kubeconfig=kwargs.get("kubeconfig"),
@@ -61,6 +65,7 @@ def scan(**kwargs: Any) -> None:
         agentic=kwargs.get("agentic", False),
         agentic_model=kwargs.get("model"),
         agentic_api_key=kwargs.get("api_key"),
+        agentic_api_base=kwargs.get("api_base"),
         agentic_max_calls=kwargs.get("max_calls", 200),
         agentic_max_rounds=kwargs.get("max_rounds", 5),
     )
@@ -132,8 +137,21 @@ def status(output: str) -> None:
 @main.command()
 @click.option("--input", "input_dir", type=click.Path(exists=True), required=True, help="Knowledge base directory")
 @click.option("--output", type=click.Path(), required=True, help="Output directory for generated docs")
-@click.option("--model", default="openrouter/anthropic/claude-haiku-4-5", help="litellm model identifier")
-@click.option("--api-key", envvar="OPENROUTER_API_KEY", default=None, help="API key (or set OPENROUTER_API_KEY)")
+@click.option(
+    "--model",
+    required=True,
+    help="litellm model identifier (e.g. claude-haiku-4-5, gpt-4o-mini, openrouter/..., ollama/llama3.1)",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="API key (falls back to provider env var: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)",
+)
+@click.option(
+    "--api-base",
+    default=None,
+    help="Override API base URL (e.g. http://localhost:11434 for Ollama, self-hosted vLLM/LM Studio)",
+)
 @click.option("--max-calls", default=50, type=click.IntRange(min=1), help="Max AI calls budget")
 @click.option("--timeout", default=120, type=click.IntRange(min=1), help="Per-call timeout in seconds")
 @click.option("--recommendations", is_flag=True, default=False, help="Also generate recommendations")
@@ -144,6 +162,7 @@ def generate(
     output: str,
     model: str,
     api_key: str | None,
+    api_base: str | None,
     max_calls: int,
     timeout: int,
     recommendations: bool,
@@ -155,11 +174,13 @@ def generate(
     from kube2docs.ai.writer import generate_docs
     from kube2docs.progress.tracker import ProgressTracker
 
-    if not api_key:
-        click.echo("Error: --api-key is required (or set OPENROUTER_API_KEY env var)", err=True)
-        raise SystemExit(1)
-
-    ai = AIProvider(model=model, api_key=api_key, max_calls=max_calls, timeout=timeout)
+    ai = AIProvider(
+        model=model,
+        api_key=api_key,
+        api_base=api_base,
+        max_calls=max_calls,
+        timeout=timeout,
+    )
     tracker = ProgressTracker(Path(input_dir))
 
     generate_docs(
@@ -172,7 +193,6 @@ def generate(
         workers=workers,
     )
     tracker.complete()
-
 
 
 if __name__ == "__main__":

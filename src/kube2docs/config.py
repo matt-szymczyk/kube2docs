@@ -59,6 +59,7 @@ class ScanConfig:
     agentic: bool = False
     agentic_model: str | None = None
     agentic_api_key: str | None = None
+    agentic_api_base: str | None = None
     agentic_max_rounds: int = 5
     agentic_max_execs: int = 20
     agentic_max_calls: int = 200

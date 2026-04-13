@@ -28,10 +28,28 @@ uv venv && uv pip install -e ".[dev]"
 # Scan the cluster
 kube2docs scan --output ./kb/
 
-# Generate docs
-export OPENROUTER_API_KEY=...
+# Generate docs (pick any provider — see "AI providers" below)
+export ANTHROPIC_API_KEY=sk-ant-...
 kube2docs generate --input ./kb/ --output ./docs/ \
-  --model openrouter/anthropic/claude-haiku-4-5 --recommendations
+  --model claude-haiku-4-5 --recommendations
+```
+
+## AI providers
+
+`generate` and `--agentic` scan go through [litellm](https://docs.litellm.ai/docs/providers), so any model it supports works. Pass the model string via `--model`, set the provider env var (or pass `--api-key`), and add `--api-base` for self-hosted endpoints (vLLM, LM Studio, LocalAI, non-default Ollama).
+
+| Provider | Env var | Example `--model` |
+|---|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-haiku-4-5` |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| OpenRouter | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.5` |
+| AWS Bedrock | AWS credentials | `bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0` |
+| Google Gemini | `GEMINI_API_KEY` | `gemini/gemini-2.0-flash` |
+| Ollama (local) | `OLLAMA_API_BASE` (if non-default) | `ollama/llama3.1` |
+
+```bash
+kube2docs generate --input ./kb/ --output ./docs/ \
+  --model openai/my-local-model --api-base http://localhost:8000/v1
 ```
 
 ## How scanning works
@@ -51,11 +69,11 @@ You pick **how** that runtime discovery happens:
 **Agentic** hands the inventory data to an LLM, which iteratively chooses commands to exec based on what it learns from each step. Works on distroless containers (by reading image metadata when there's no shell), and discovers ~5x more dependencies in testing because it actually reads and understands config files. Non-deterministic; sends exec output (with secrets redacted) to the LLM provider.
 
 ```bash
-# Preview what would be scanned and estimated cost
-kube2docs scan --output ./kb/ --agentic \
-  --model openrouter/moonshotai/kimi-k2.5 --dry-run
+# Preview (no LLM calls)
+kube2docs scan --output ./kb/ --agentic --dry-run \
+  --model openrouter/moonshotai/kimi-k2.5
 
-# Run the agentic scan
+# Run (any provider from the table above works)
 kube2docs scan --output ./kb/ --agentic \
   --model openrouter/moonshotai/kimi-k2.5 --api-key $OPENROUTER_API_KEY
 ```

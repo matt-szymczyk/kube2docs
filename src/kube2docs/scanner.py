@@ -60,9 +60,11 @@ def run_scan(config: ScanConfig) -> None:
         from kube2docs.phases.agentic import run_agentic_scan
 
         services = _load_services(store)
+        assert config.agentic_model, "--model is required for agentic scan"
         ai = AIProvider(
-            model=config.agentic_model or "",
+            model=config.agentic_model,
             api_key=config.agentic_api_key,
+            api_base=config.agentic_api_base,
             max_calls=config.agentic_max_calls,
         )
         run_agentic_scan(kube, config, store, tracker, services, fingerprints, ai)

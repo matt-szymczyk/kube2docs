@@ -25,11 +25,13 @@ class AIProvider:
         self,
         model: str,
         api_key: str | None = None,
+        api_base: str | None = None,
         max_calls: int = 500,
         timeout: int = 120,
     ) -> None:
         self.model = model
         self.api_key = api_key
+        self.api_base = api_base
         self.calls_used = 0
         self.max_calls = max_calls
         self.timeout = timeout
@@ -43,10 +45,33 @@ class AIProvider:
     def budget_exhausted(self) -> bool:
         return self.calls_used >= self.max_calls
 
+    def _build_kwargs(self, messages: list[dict[str, str]], temperature: float) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "timeout": self.timeout,
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        return kwargs
+
+    def _parse_json(self, text: str) -> dict[str, Any] | list[Any] | None:
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3].strip()
+        try:
+            return cast(dict[str, Any] | list[Any], json.loads(text))
+        except json.JSONDecodeError:
+            logger.warning("AI response was not valid JSON for model=%s", self.model)
+            return None
+
     def _call_litellm(self, system: str, user: str, temperature: float) -> str | None:
         """Send a chat completion and return raw text.
 
-        Handles budget checking, kwargs construction, and error handling.
         Returns None if the call fails or budget is exhausted.
         """
         with self._lock:
@@ -54,20 +79,9 @@ class AIProvider:
                 logger.warning("AI budget exhausted (%d/%d calls used)", self.calls_used, self.max_calls)
                 return None
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "timeout": self.timeout,
-        }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         try:
-            response = litellm.completion(**kwargs)
+            response = litellm.completion(**self._build_kwargs(messages, temperature))
             with self._lock:
                 self.calls_used += 1
             return cast(str, response.choices[0].message.content.strip())
@@ -87,20 +101,7 @@ class AIProvider:
         exhausted.
         """
         text = self._call_litellm(system, user, temperature)
-        if text is None:
-            return None
-
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3].strip()
-
-        try:
-            return cast(dict[str, Any] | list[Any], json.loads(text))
-        except json.JSONDecodeError:
-            logger.warning("AI response was not valid JSON for model=%s", self.model)
-            return None
+        return self._parse_json(text) if text is not None else None
 
     def complete_text(
         self,
@@ -129,17 +130,8 @@ class AIProvider:
                 logger.warning("AI budget exhausted (%d/%d calls used)", self.calls_used, self.max_calls)
                 return None
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "timeout": self.timeout,
-        }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-
         try:
-            response = litellm.completion(**kwargs)
+            response = litellm.completion(**self._build_kwargs(messages, temperature))
             with self._lock:
                 self.calls_used += 1
             text = cast(str, response.choices[0].message.content.strip())
@@ -147,14 +139,4 @@ class AIProvider:
             logger.warning("AI call failed for model=%s", self.model, exc_info=True)
             return None
 
-        # Strip markdown fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3].strip()
-
-        try:
-            return cast(dict[str, Any] | list[Any], json.loads(text))
-        except json.JSONDecodeError:
-            logger.warning("AI response was not valid JSON for model=%s", self.model)
-            return None
+        return self._parse_json(text)
