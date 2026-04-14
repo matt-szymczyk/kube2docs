@@ -1,9 +1,9 @@
 """Tests for OCI image-layer inspection (no network — pure unit tests)."""
 
-import pytest
+from unittest.mock import patch
 
 from kube2docs.phases.image_inspect import (
-    _ImageRef,
+    ImageInspectionTracker,
     _extract_from_config,
     _parse_alpine_packages,
     _parse_debian_packages,
@@ -277,6 +277,96 @@ Description: Secure Sockets Layer toolkit - shared libraries
         assert len(pkgs) == 1
         assert pkgs[0]["name"] == "tzdata"
         assert pkgs[0]["version"] == "2024a-0+deb12u1"
+
+
+class TestImageInspectionTracker:
+    """Per-registry failure tracking and warning emission."""
+
+    def test_successful_inspection_records_success(self) -> None:
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value={"entrypoint": ["/app"]}):
+            result = tracker.inspect("nginx:1.25")
+        assert result == {"entrypoint": ["/app"]}
+        assert warnings == []
+        summary = tracker.summary()
+        assert summary["registry-1.docker.io"]["successes"] == 1
+        assert summary["registry-1.docker.io"]["failures"] == 0
+
+    def test_single_failure_does_not_warn(self) -> None:
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value=None):
+            tracker.inspect("nginx:1.25")
+        assert warnings == []  # below threshold
+
+    def test_warning_fires_at_threshold(self) -> None:
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append, warn_after_failures=3)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value=None):
+            tracker.inspect("nginx:1")
+            tracker.inspect("nginx:2")
+            tracker.inspect("nginx:3")
+        assert len(warnings) == 1
+        assert "registry-1.docker.io" in warnings[0]
+        assert "unreachable" in warnings[0]
+
+    def test_warning_fires_only_once_per_registry(self) -> None:
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append, warn_after_failures=2)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value=None):
+            for i in range(10):
+                tracker.inspect(f"nginx:{i}")
+        assert len(warnings) == 1  # only one warning for 10 failures
+
+    def test_separate_registries_warned_independently(self) -> None:
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append, warn_after_failures=2)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value=None):
+            tracker.inspect("nginx:1")  # docker.io failure 1
+            tracker.inspect("ghcr.io/org/app:1")  # ghcr.io failure 1
+            tracker.inspect("nginx:2")  # docker.io failure 2 → warn
+            tracker.inspect("ghcr.io/org/app:2")  # ghcr.io failure 2 → warn
+        assert len(warnings) == 2
+        registries_warned = [
+            "registry-1.docker.io" in w for w in warnings
+        ] + [
+            "ghcr.io" in w for w in warnings
+        ]
+        assert any(registries_warned)
+
+    def test_success_after_failures_does_not_reset_warning(self) -> None:
+        # Once warned, future successes don't clear the warned state.
+        # But future failures don't re-warn either.
+        warnings: list[str] = []
+        tracker = ImageInspectionTracker(warn_callback=warnings.append, warn_after_failures=2)
+        results = [None, None, {"entrypoint": ["/app"]}, None]
+        with patch("kube2docs.phases.image_inspect.inspect_image", side_effect=results):
+            for i in range(4):
+                tracker.inspect(f"nginx:{i}")
+        assert len(warnings) == 1
+
+    def test_no_callback_silent(self) -> None:
+        # Tracker should work without a callback; just silently track.
+        tracker = ImageInspectionTracker(warn_callback=None, warn_after_failures=1)
+        with patch("kube2docs.phases.image_inspect.inspect_image", return_value=None):
+            tracker.inspect("nginx:1")
+            tracker.inspect("nginx:2")
+        summary = tracker.summary()
+        assert summary["registry-1.docker.io"]["failures"] == 2
+
+    def test_summary_includes_all_registries(self) -> None:
+        tracker = ImageInspectionTracker()
+        with patch("kube2docs.phases.image_inspect.inspect_image") as mock_inspect:
+            mock_inspect.return_value = {"entrypoint": ["/a"]}
+            tracker.inspect("nginx:1")
+            mock_inspect.return_value = None
+            tracker.inspect("ghcr.io/org/app:1")
+        summary = tracker.summary()
+        assert "registry-1.docker.io" in summary
+        assert "ghcr.io" in summary
+        assert summary["registry-1.docker.io"]["successes"] == 1
+        assert summary["ghcr.io"]["failures"] == 1
 
 
 class TestParseWwwAuthenticate:

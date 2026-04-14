@@ -1,4 +1,50 @@
-"""Main orchestrator — runs phases in order."""
+"""Main orchestrator — runs phases in order.
+
+Scan pipeline decision tree
+---------------------------
+
+Phase 1 (survey) always runs: a read-only Kubernetes API inventory. The
+second stage is selected by a single --mode flag. Each mode is one
+combination on the (exec, image, LLM) capability axis:
+
+    Mode       exec   image   LLM   Use when
+    -------    ----   -----   ---   --------------------------------------
+    survey      no     no      no   quick K8s API overview
+    image       no    yes      no   no pods/exec RBAC; works on distroless
+    exec       yes     no      no   air-gapped cluster (no registry egress)
+    deep       yes    yes      no   default — both signals, triangulated
+    agentic    yes    yes     yes   LLM-driven exploration; needs --model
+
+These observe different *fact categories*. They are not "more" or "less" of
+the same data:
+
+    Mode      Fact category            Confidence
+    survey    declared state           0.3
+    image     packaged state           0.5
+    exec      runtime state            0.7
+    deep      runtime + packaged       0.7
+    agentic   runtime + LLM reasoning  0.9
+
+"Confidence" is calibrated for questions about *live runtime state*. For
+questions about *what is installed in the image*, image inspection is
+categorically stronger than exec (it reads the full package database; ps only
+shows currently running processes).
+
+Triangulation (deep and agentic always run image inspection)
+------------------------------------------------------------
+In deep and agentic modes, OCI image-layer inspection runs for every
+container alongside exec. Exec sees runtime state; image sees packaged
+state. Both contribute. Examples of facts only the combination reveals:
+  - Package installed in image but not currently running → attack surface
+  - Process running but not in the image's package DB → injected at runtime
+  - Env var defined at runtime but not baked in → added by the orchestrator
+
+If an image registry is unreachable, ImageInspectionTracker emits a
+one-off warning per registry and the scan continues with exec-only data.
+The scan never fails because of image inspection. Users who want to skip
+registry calls entirely (no warnings, no network egress) should use
+--mode=exec instead.
+"""
 
 import contextlib
 import json
@@ -11,7 +57,7 @@ from kube2docs.knowledge.fingerprint import FingerprintTracker
 from kube2docs.knowledge.schemas import ClusterOverview, DependencyEdge, WorkloadProfile
 from kube2docs.knowledge.store import KnowledgeStore
 from kube2docs.kube.client import KubeClient
-from kube2docs.phases.deep_inspect import run_deep_inspect
+from kube2docs.phases.deep_inspect import run_deep_inspect, run_image_only_inspect
 from kube2docs.phases.survey import run_survey
 from kube2docs.progress.tracker import ProgressTracker
 
@@ -53,14 +99,13 @@ def run_scan(config: ScanConfig) -> None:
         tracker.complete()
         return
 
-    # Phase 2 or Phase 3
-    if config.agentic:
-        # Phase 3: AI-driven agentic scan (replaces Phase 2)
+    # Second stage: dispatch on the single mode axis
+    if config.mode == "agentic":
         from kube2docs.ai.provider import AIProvider
         from kube2docs.phases.agentic import run_agentic_scan
 
         services = _load_services(store)
-        assert config.agentic_model, "--model is required for agentic scan"
+        assert config.agentic_model, "--model is required for --mode=agentic"
         ai = AIProvider(
             model=config.agentic_model,
             api_key=config.agentic_api_key,
@@ -69,11 +114,17 @@ def run_scan(config: ScanConfig) -> None:
         )
         run_agentic_scan(kube, config, store, tracker, services, fingerprints, ai)
         _merge_outbound_connections(store, tracker)
-    elif config.depth == "deep":
-        # Phase 2: Deterministic deep inspection
+    elif config.mode == "image":
+        run_image_only_inspect(kube, config, store, tracker, fingerprints)
+    elif config.mode == "exec":
         services = _load_services(store)
-        run_deep_inspect(kube, config, store, tracker, services, fingerprints)
+        run_deep_inspect(kube, config, store, tracker, services, fingerprints, with_image=False)
         _merge_outbound_connections(store, tracker)
+    elif config.mode == "deep":
+        services = _load_services(store)
+        run_deep_inspect(kube, config, store, tracker, services, fingerprints, with_image=True)
+        _merge_outbound_connections(store, tracker)
+    # mode == "survey" → Phase 1 output is already written; nothing more to do.
 
     tracker.complete()
 
@@ -103,24 +154,35 @@ def _print_dry_run_summary(config: ScanConfig, store: KnowledgeStore, tracker: P
             sched = f"  schedule={p.cron_schedule}" if p.cron_schedule else ""
             tracker.log(f"    - {p.namespace}/{p.name}{sched}")
 
-    if config.agentic:
+    if config.mode == "agentic":
         from kube2docs.phases.agentic import _estimate_cost
 
         estimate = _estimate_cost(config.agentic_model or "", len(execable))
         tracker.log("")
-        tracker.log(f"Agentic scan: model={config.agentic_model}, max budget={config.agentic_max_calls} calls")
+        tracker.log(f"--mode=agentic: model={config.agentic_model}, max budget={config.agentic_max_calls} calls")
         if estimate is not None:
             tracker.log(f"Estimated cost: ~${estimate:.3f} (at ~2 LLM rounds per workload)")
         else:
             tracker.log("Cost estimate unavailable — pricing unknown for this model")
-    else:
+    elif config.mode == "image":
+        tracker.log("")
+        tracker.log("--mode=image: no pod exec, anonymous registry pulls only.")
+        tracker.log("For each container image: fetch manifest + config, scan small layers for")
+        tracker.log("OS package databases (Alpine/Debian). Confidence tier: 0.5.")
+    elif config.mode in ("exec", "deep"):
         from kube2docs.phases.deep_inspect import _DISCOVERY_COMMANDS
 
         tracker.log("")
-        tracker.log("Deterministic deep inspect: free (no LLM calls)")
+        if config.mode == "exec":
+            tracker.log("--mode=exec: pod exec only, no registry calls (air-gapped).")
+        else:
+            tracker.log("--mode=deep: pod exec + image-layer triangulation.")
         tracker.log("Commands that would be exec'd into each container:")
         for label, cmd in _DISCOVERY_COMMANDS:
             tracker.log(f"  [{label}] {cmd}")
+    else:
+        tracker.log("")
+        tracker.log("--mode=survey: no second-stage inspection.")
 
     tracker.log("")
     tracker.log("Remove --dry-run to execute the scan.")

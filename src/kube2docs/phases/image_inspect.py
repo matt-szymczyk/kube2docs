@@ -1,7 +1,7 @@
 """OCI image-layer inspection — operational knowledge extraction without exec.
 
 Implements the image-layer analysis tier of the multi-modal extraction pipeline.
-Activated when kubectl exec fails: distroless containers, scratch-based images,
+Activated when pod exec fails: distroless containers, scratch-based images,
 or environments where exec permissions are restricted.
 
 Confidence tier: 0.5 — between survey (0.3, Kubernetes API declarations only)
@@ -18,10 +18,13 @@ import io
 import json
 import logging
 import tarfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from kube2docs.knowledge.schemas import EnvVar, NetworkListener, WorkloadProfile
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +374,31 @@ def _extract_packages(
     return None
 
 
+def apply_image_analysis(profile: WorkloadProfile, container_name: str, analysis: dict[str, Any]) -> None:
+    """Merge image-layer analysis results into a WorkloadProfile.
+
+    Populates:
+    - profile.image_analysis[container_name] — full raw analysis
+    - profile.network_listeners — from declared ports in image config
+    - profile.env_vars — baked-in env var names from image config
+    """
+    profile.image_analysis[container_name] = analysis
+
+    existing_ports = {nl.port for nl in profile.network_listeners}
+    for port in analysis.get("declared_ports", []):
+        if port not in existing_ports:
+            profile.network_listeners.append(
+                NetworkListener(port=port, protocol="TCP", purpose="declared in image config")
+            )
+            existing_ports.add(port)
+
+    existing_env = {ev.name for ev in profile.env_vars}
+    for env_name in analysis.get("baked_env_vars", []):
+        if env_name not in existing_env and not env_name.startswith("PATH"):
+            profile.env_vars.append(EnvVar(name=env_name, source="image_config", value_hash=""))
+            existing_env.add(env_name)
+
+
 def inspect_image(image_ref: str, timeout: int = 30) -> dict[str, Any] | None:
     """Extract operational knowledge from an OCI image without exec.
 
@@ -406,3 +434,69 @@ def inspect_image(image_ref: str, timeout: int = 30) -> dict[str, Any] | None:
     except Exception as exc:
         logger.debug("Image inspection failed for %s: %s", image_ref, exc)
         return None
+
+
+class ImageInspectionTracker:
+    """Stateful wrapper around inspect_image() that surfaces registry failures.
+
+    Image inspection can fail silently for many reasons: air-gapped cluster,
+    DNS resolution failure, network policy block, private registry without
+    credentials. Without feedback, users would see partial profiles and not
+    understand why packaged-state data is missing.
+
+    This wrapper tracks failures per registry hostname. After the same
+    registry fails `warn_after_failures` times, it emits a single warning via
+    the supplied callback (intended to be the progress tracker's warning
+    method). It keeps trying — the warning does not disable future attempts —
+    but the user gets one clear signal per unreachable registry.
+    """
+
+    def __init__(
+        self,
+        timeout: int = 30,
+        warn_callback: Callable[[str], None] | None = None,
+        warn_after_failures: int = 3,
+    ) -> None:
+        self.timeout = timeout
+        self._warn = warn_callback
+        self._warn_threshold = warn_after_failures
+        self._failures: dict[str, int] = {}
+        self._warned: set[str] = set()
+        self._successes: dict[str, int] = {}
+
+    def inspect(self, image_ref: str) -> dict[str, Any] | None:
+        """Call inspect_image() and track the outcome per registry."""
+        result = inspect_image(image_ref, timeout=self.timeout)
+        try:
+            registry = _parse_image_ref(image_ref).registry
+        except Exception:
+            return result
+
+        if result is None:
+            self._failures[registry] = self._failures.get(registry, 0) + 1
+            if (
+                self._warn is not None
+                and self._failures[registry] >= self._warn_threshold
+                and registry not in self._warned
+            ):
+                self._warned.add(registry)
+                self._warn(
+                    f"image registry {registry!r} unreachable after "
+                    f"{self._failures[registry]} attempts — packaged-state analysis "
+                    f"will be missing for images pulled from it. "
+                    f"Cluster may be air-gapped, or registry auth/network policy is blocking access."
+                )
+        else:
+            self._successes[registry] = self._successes.get(registry, 0) + 1
+        return result
+
+    def summary(self) -> dict[str, dict[str, int]]:
+        """Return per-registry success/failure counts for end-of-scan reporting."""
+        registries = set(self._successes) | set(self._failures)
+        return {
+            r: {
+                "successes": self._successes.get(r, 0),
+                "failures": self._failures.get(r, 0),
+            }
+            for r in sorted(registries)
+        }

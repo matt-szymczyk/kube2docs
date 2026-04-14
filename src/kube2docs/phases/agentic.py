@@ -24,6 +24,7 @@ from kube2docs.knowledge.schemas import (
 from kube2docs.knowledge.store import KnowledgeStore
 from kube2docs.kube.client import KubeClient
 from kube2docs.kube.exec import PodExec, pick_running_pod
+from kube2docs.phases.image_inspect import ImageInspectionTracker, apply_image_analysis
 from kube2docs.progress.tracker import ProgressTracker
 from kube2docs.security.hasher import hash_value, redact_secrets
 
@@ -182,6 +183,7 @@ def run_agentic_scan(
     tracker.phase_header("Phase 3: Agentic Scan")
 
     pod_exec = PodExec(core_api=kube.core, timeout=config.timeout)
+    image_inspector = ImageInspectionTracker(timeout=config.timeout, warn_callback=tracker.warning)
     profiles = _load_profiles(store)
     tracker.start("agentic_scan", len(profiles))
 
@@ -213,6 +215,15 @@ def run_agentic_scan(
             continue
 
         pod_name = pod.metadata.name
+
+        # Triangulate: run image-layer analysis for every container before
+        # the agentic loop. Gives the LLM installed-package context and
+        # captures packaged-state facts that exec-based discovery misses.
+        # Registry unreachable → one-off warning, scan continues with exec only.
+        for cont_info in profile.containers:
+            analysis = image_inspector.inspect(cont_info.image)
+            if analysis:
+                apply_image_analysis(profile, cont_info.name, analysis)
 
         # Run the agentic conversation loop
         _run_agentic_loop(

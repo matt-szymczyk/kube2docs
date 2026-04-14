@@ -24,34 +24,59 @@ def main() -> None:
 @click.option("--context", default=None, help="Kubeconfig context to use")
 @click.option("--namespaces", default=None, help="Comma-separated namespace filter")
 @click.option("--output", type=click.Path(), required=True, help="Output directory for knowledge base")
-@click.option("--depth", type=click.Choice(["survey", "deep"]), default="deep", help="Exploration depth")
+@click.option(
+    "--mode",
+    type=click.Choice(["survey", "image", "exec", "deep", "agentic"]),
+    default="deep",
+    help=(
+        "Scan mode. "
+        "survey: Kubernetes API only. "
+        "image: OCI image-layer inspection (no pod exec, needs registry egress). "
+        "exec: pod exec only via the K8s API (no registry calls, for air-gapped clusters). "
+        "deep: exec + image-layer inspection [default]. "
+        "agentic: LLM-driven exec + image-layer inspection (requires --model)."
+    ),
+)
 @click.option("--force-rescan", is_flag=True, default=False, help="Ignore fingerprints, rescan all")
 @click.option("--reveal-configmap-values", is_flag=True, default=False, help="Show ConfigMap values in plaintext")
 @click.option("--timeout", default=300, type=click.IntRange(min=1), help="Per-operation timeout in seconds")
 @click.option("--dry-run", is_flag=True, default=False, help="Survey only, print commands that would run, then exit")
-@click.option("--agentic", is_flag=True, default=False, help="Use LLM-driven inspection instead of deterministic exec")
-@click.option("--model", default=None, help="Model for agentic scan (required with --agentic)")
+@click.option("--model", default=None, help="LLM model identifier — required when --mode=agentic")
 @click.option(
     "--api-key",
     default=None,
-    help="API key for agentic scan (falls back to provider env var: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)",
+    help="LLM API key for --mode=agentic (falls back to provider env var: ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)",
 )
 @click.option(
     "--api-base",
     default=None,
-    help="Override API base URL (e.g. http://localhost:11434 for Ollama, self-hosted vLLM/LM Studio)",
+    help="LLM API base URL override (e.g. http://localhost:11434 for Ollama, self-hosted vLLM/LM Studio)",
 )
-@click.option("--max-calls", default=200, type=click.IntRange(min=1), help="Global LLM call budget for agentic scan")
-@click.option("--max-rounds", default=5, type=click.IntRange(min=1), help="Max LLM rounds per workload in agentic mode")
+@click.option(
+    "--max-calls",
+    default=200,
+    type=click.IntRange(min=1),
+    help="Global LLM call budget for --mode=agentic",
+)
+@click.option(
+    "--max-rounds",
+    default=5,
+    type=click.IntRange(min=1),
+    help="Max LLM rounds per workload in --mode=agentic",
+)
 def scan(**kwargs: Any) -> None:
     """Scan a Kubernetes cluster and produce operational knowledge."""
     ns_list = None
     if kwargs.get("namespaces"):
         ns_list = [n.strip() for n in kwargs["namespaces"].split(",")]
 
-    if kwargs.get("agentic") and not kwargs.get("model"):
-        click.echo("Error: --model is required when using --agentic", err=True)
-        raise SystemExit(1)
+    mode = kwargs["mode"]
+    if mode == "agentic" and not kwargs.get("model"):
+        raise click.UsageError("--model is required when --mode=agentic")
+    if mode != "agentic" and any(kwargs.get(k) for k in ("model", "api_key", "api_base")):
+        raise click.UsageError(
+            f"--model / --api-key / --api-base are only valid with --mode=agentic (got --mode={mode})"
+        )
 
     output_path = Path(kwargs["output"])
     if output_path.exists() and not os.access(output_path, os.W_OK):
@@ -63,12 +88,11 @@ def scan(**kwargs: Any) -> None:
         context=kwargs.get("context"),
         namespaces=ns_list,
         output=Path(kwargs["output"]),
-        depth=kwargs["depth"],
+        mode=mode,
         force_rescan=kwargs["force_rescan"],
         reveal_configmap_values=kwargs["reveal_configmap_values"],
         timeout=kwargs["timeout"],
         dry_run=kwargs.get("dry_run", False),
-        agentic=kwargs.get("agentic", False),
         agentic_model=kwargs.get("model"),
         agentic_api_key=kwargs.get("api_key"),
         agentic_api_base=kwargs.get("api_base"),

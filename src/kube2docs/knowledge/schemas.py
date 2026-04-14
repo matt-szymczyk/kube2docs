@@ -118,7 +118,7 @@ class WorkloadProfile(BaseModel):
     failure_modes: list[FailureMode] = Field(default_factory=list)
     rbac: RbacSummary | None = None
     # Per-container image-layer analysis results, keyed by container name.
-    # Populated when kubectl exec fails (e.g. distroless images).
+    # Populated when pod exec fails (e.g. distroless images).
     image_analysis: dict[str, Any] = Field(default_factory=dict)
     summary: str | None = None
 

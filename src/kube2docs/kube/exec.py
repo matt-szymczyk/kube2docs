@@ -1,4 +1,10 @@
-"""kubectl exec helpers for running commands inside pods."""
+"""Pod exec helpers — runs commands inside pods via the Kubernetes API.
+
+Uses the official Python client's `connect_get_namespaced_pod_exec` streaming
+endpoint. Does not invoke the `kubectl` binary; the scanner has no kubectl
+dependency. The user only needs a kubeconfig with permission to read pods and
+to call the `pods/exec` subresource.
+"""
 
 import logging
 from typing import Any

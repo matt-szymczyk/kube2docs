@@ -25,7 +25,7 @@ from kube2docs.knowledge.schemas import (
 from kube2docs.knowledge.store import KnowledgeStore
 from kube2docs.kube.client import KubeClient
 from kube2docs.kube.exec import PodExec, pick_running_pod
-from kube2docs.phases.image_inspect import inspect_image
+from kube2docs.phases.image_inspect import ImageInspectionTracker, apply_image_analysis
 from kube2docs.progress.tracker import ProgressTracker
 from kube2docs.security.hasher import hash_value, redact_secrets
 
@@ -111,12 +111,24 @@ def run_deep_inspect(
     tracker: ProgressTracker,
     services: list[dict[str, Any]],
     fingerprints: FingerprintTracker | None = None,
+    *,
+    with_image: bool = True,
 ) -> None:
-    """Execute Phase 2: deep inspection of each workload via exec."""
-    tracker.phase_header("Phase 2: Deep Inspection")
+    """Execute Phase 2: deep inspection of each workload via exec.
+
+    When `with_image` is True (default), OCI image-layer inspection runs
+    alongside exec for every container — exec sees runtime state, image sees
+    packaged state, both contribute to the profile. Set False for --mode=exec,
+    which skips all registry calls (air-gapped clusters).
+    """
+    header = "Phase 2: Deep Inspection" if with_image else "Phase 2: Deep Inspection (exec only, no registry)"
+    tracker.phase_header(header)
 
     extractor = Extractor()
     pod_exec = PodExec(core_api=kube.core, timeout=config.timeout)
+    image_inspector: ImageInspectionTracker | None = (
+        ImageInspectionTracker(timeout=config.timeout, warn_callback=tracker.warning) if with_image else None
+    )
 
     # Load profiles written by Phase 1
     profiles = _load_profiles(store)
@@ -157,6 +169,17 @@ def run_deep_inspect(
         for cont_info in containers_to_inspect:
             container = cont_info.name if cont_info else None
 
+            # Triangulation: when image inspection is enabled, run it alongside
+            # exec for every container. Exec sees runtime state; image sees
+            # packaged state. Both contribute to the profile. Disabled in
+            # --mode=exec (air-gapped clusters with no registry egress).
+            image_ran = False
+            if image_inspector is not None and cont_info is not None:
+                analysis = image_inspector.inspect(cont_info.image)
+                if analysis:
+                    apply_image_analysis(profile, cont_info.name, analysis)
+                    image_ran = True
+
             # Run discovery commands for this container
             raw_outputs: dict[str, str] = {}
             for label, command in _DISCOVERY_COMMANDS:
@@ -165,20 +188,12 @@ def run_deep_inspect(
                     raw_outputs[label] = output
 
             if not raw_outputs:
-                # Exec failed — try image-layer analysis as a fallback.
-                # This handles distroless containers, scratch images, and
-                # environments where exec permissions are restricted.
-                if cont_info is not None:
-                    analysis = inspect_image(cont_info.image, timeout=config.timeout)
-                    if analysis:
-                        _apply_image_analysis(profile, cont_info.name, analysis)
-                        tracker.log(
-                            f"{ns}/{name}/{container}: exec failed, image-layer analysis succeeded"
-                            f" ({analysis.get('packages', {}).get('os', 'unknown OS')},"
-                            f" {len(analysis.get('packages', {}).get('packages', []))} packages)"
-                        )
-                    else:
-                        tracker.log(f"{ns}/{name}/{container}: no exec and image registry unreachable")
+                if image_ran:
+                    tracker.log(f"{ns}/{name}/{container}: exec failed, image-layer data captured")
+                elif image_inspector is None:
+                    tracker.log(f"{ns}/{name}/{container}: exec failed (image inspection disabled in --mode=exec)")
+                else:
+                    tracker.log(f"{ns}/{name}/{container}: exec failed and image registry unreachable")
                 continue
 
             any_succeeded = True
@@ -231,6 +246,66 @@ def run_deep_inspect(
         completed += 1
         findings = _summarize_findings(profile)
         tracker.item(f"{ns}/{name}", findings)
+
+
+def run_image_only_inspect(
+    kube: KubeClient,  # noqa: ARG001 — kept for signature symmetry with run_deep_inspect
+    config: ScanConfig,
+    store: KnowledgeStore,
+    tracker: ProgressTracker,
+    fingerprints: FingerprintTracker | None = None,
+) -> None:
+    """Phase 2 (image-only): OCI image-layer extraction without any pod exec.
+
+    Triggered by --depth=image. Contacts each container's image registry over
+    HTTPS (anonymously) and extracts installed packages, declared ports,
+    entrypoint, and baked-in env var names. Never touches running pods.
+
+    Use when:
+      - The scanner does not have pods/exec RBAC
+      - Exec is blocked by admission/audit policy
+      - You want an exec-free baseline before opting into deep inspection
+    """
+    tracker.phase_header("Phase 2: Image-Layer Inspection (no exec)")
+
+    profiles = _load_profiles(store)
+    image_inspector = ImageInspectionTracker(timeout=config.timeout, warn_callback=tracker.warning)
+    tracker.start("image_inspect", len(profiles))
+
+    completed = 0
+    for profile in profiles:
+        ns = profile.namespace
+        name = profile.name
+        tracker.update(f"{ns}/{name}", completed)
+
+        if profile.workload_type == "CronJob":
+            tracker.log(f"Skipping {ns}/{name} (CronJob)")
+            completed += 1
+            continue
+
+        # Respect incremental rescan fingerprints
+        if fingerprints and not config.force_rescan and not fingerprints.was_changed_this_scan(ns, name):
+            tracker.log(f"{ns}/{name} unchanged, skipping image inspection")
+            completed += 1
+            continue
+
+        any_succeeded = False
+        for cont_info in profile.containers:
+            analysis = image_inspector.inspect(cont_info.image)
+            if analysis:
+                apply_image_analysis(profile, cont_info.name, analysis)
+                any_succeeded = True
+
+        if any_succeeded:
+            profile.confidence = max(profile.confidence, 0.5)
+            profile.inspection_source = "image_inspect"
+            profile.explored_at = datetime.now(UTC)
+            store.write_model(store.namespace_dir(ns) / f"{name}.profile.json", profile)
+            tracker.item(f"{ns}/{name}", _summarize_image_analysis(profile))
+        else:
+            tracker.warning(f"{ns}/{name}: image registry unreachable for all containers")
+
+        completed += 1
 
 
 def _load_profiles(store: KnowledgeStore) -> list[WorkloadProfile]:
@@ -566,35 +641,6 @@ def _summarize_findings(profile: WorkloadProfile) -> str:
         parts.append("basic info only")
 
     return ", ".join(parts)
-
-
-def _apply_image_analysis(profile: WorkloadProfile, container_name: str, analysis: dict[str, Any]) -> None:
-    """Merge image-layer analysis results into a WorkloadProfile.
-
-    Populates:
-    - profile.image_analysis[container_name] — full raw analysis
-    - profile.network_listeners — from declared ports in image config
-    - profile.env_vars — baked-in env var names from image config
-    """
-    profile.image_analysis[container_name] = analysis
-
-    # Declared ports → network_listeners (if not already present from exec)
-    existing_ports = {nl.port for nl in profile.network_listeners}
-    for port in analysis.get("declared_ports", []):
-        if port not in existing_ports:
-            profile.network_listeners.append(
-                NetworkListener(port=port, protocol="TCP", purpose="declared in image config")
-            )
-            existing_ports.add(port)
-
-    # Baked env var names → env_vars (source = image_config)
-    existing_env = {ev.name for ev in profile.env_vars}
-    for env_name in analysis.get("baked_env_vars", []):
-        if env_name not in existing_env and not env_name.startswith("PATH"):
-            profile.env_vars.append(
-                EnvVar(name=env_name, source="image_config", value_hash="")
-            )
-            existing_env.add(env_name)
 
 
 def _summarize_image_analysis(profile: WorkloadProfile) -> str:

@@ -51,12 +51,18 @@ class ScanConfig:
     context: str | None = None
     namespaces: list[str] | None = None
     output: Path = Path("./kb")
-    depth: str = "deep"
+    # Unified scan mode — one axis from shallow to deepest:
+    #   survey:  Kubernetes API only
+    #   image:   OCI image-layer inspection (no pod exec)
+    #   exec:    pod exec only via the K8s API (no registry calls, air-gapped)
+    #   deep:    pod exec + image-layer inspection [default]
+    #   agentic: LLM-driven exec + image-layer inspection (requires agentic_model)
+    mode: str = "deep"
     force_rescan: bool = False
     reveal_configmap_values: bool = False
     timeout: int = 300
     dry_run: bool = False
-    agentic: bool = False
+    # LLM options only used when mode == "agentic"
     agentic_model: str | None = None
     agentic_api_key: str | None = None
     agentic_api_base: str | None = None
