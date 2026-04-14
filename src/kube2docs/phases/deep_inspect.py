@@ -25,6 +25,7 @@ from kube2docs.knowledge.schemas import (
 from kube2docs.knowledge.store import KnowledgeStore
 from kube2docs.kube.client import KubeClient
 from kube2docs.kube.exec import PodExec, pick_running_pod
+from kube2docs.phases.image_inspect import inspect_image
 from kube2docs.progress.tracker import ProgressTracker
 from kube2docs.security.hasher import hash_value, redact_secrets
 
@@ -164,7 +165,20 @@ def run_deep_inspect(
                     raw_outputs[label] = output
 
             if not raw_outputs:
-                tracker.log(f"{ns}/{name}/{container}: no exec commands succeeded (no shell?)")
+                # Exec failed — try image-layer analysis as a fallback.
+                # This handles distroless containers, scratch images, and
+                # environments where exec permissions are restricted.
+                if cont_info is not None:
+                    analysis = inspect_image(cont_info.image, timeout=config.timeout)
+                    if analysis:
+                        _apply_image_analysis(profile, cont_info.name, analysis)
+                        tracker.log(
+                            f"{ns}/{name}/{container}: exec failed, image-layer analysis succeeded"
+                            f" ({analysis.get('packages', {}).get('os', 'unknown OS')},"
+                            f" {len(analysis.get('packages', {}).get('packages', []))} packages)"
+                        )
+                    else:
+                        tracker.log(f"{ns}/{name}/{container}: no exec and image registry unreachable")
                 continue
 
             any_succeeded = True
@@ -194,9 +208,14 @@ def run_deep_inspect(
                 (raw_dir / f"{label}.txt").write_text(output)
 
         if not any_succeeded:
-            tracker.warning(
-                f"{ns}/{name}: no exec commands succeeded in any container (try --agentic for distroless images)"
-            )
+            # If image-layer analysis ran for any container, record that as the source.
+            if profile.image_analysis:
+                profile.confidence = 0.5
+                profile.inspection_source = "image_inspect"
+                profile.explored_at = datetime.now(UTC)
+                tracker.item(f"{ns}/{name}", _summarize_image_analysis(profile))
+            else:
+                tracker.warning(f"{ns}/{name}: no exec or image analysis succeeded")
             completed += 1
             continue
 
@@ -547,6 +566,53 @@ def _summarize_findings(profile: WorkloadProfile) -> str:
         parts.append("basic info only")
 
     return ", ".join(parts)
+
+
+def _apply_image_analysis(profile: WorkloadProfile, container_name: str, analysis: dict[str, Any]) -> None:
+    """Merge image-layer analysis results into a WorkloadProfile.
+
+    Populates:
+    - profile.image_analysis[container_name] — full raw analysis
+    - profile.network_listeners — from declared ports in image config
+    - profile.env_vars — baked-in env var names from image config
+    """
+    profile.image_analysis[container_name] = analysis
+
+    # Declared ports → network_listeners (if not already present from exec)
+    existing_ports = {nl.port for nl in profile.network_listeners}
+    for port in analysis.get("declared_ports", []):
+        if port not in existing_ports:
+            profile.network_listeners.append(
+                NetworkListener(port=port, protocol="TCP", purpose="declared in image config")
+            )
+            existing_ports.add(port)
+
+    # Baked env var names → env_vars (source = image_config)
+    existing_env = {ev.name for ev in profile.env_vars}
+    for env_name in analysis.get("baked_env_vars", []):
+        if env_name not in existing_env and not env_name.startswith("PATH"):
+            profile.env_vars.append(
+                EnvVar(name=env_name, source="image_config", value_hash="")
+            )
+            existing_env.add(env_name)
+
+
+def _summarize_image_analysis(profile: WorkloadProfile) -> str:
+    """Build a progress-tracker summary string for image-layer-only profiles."""
+    parts: list[str] = []
+    for container_name, analysis in profile.image_analysis.items():
+        pkg_info = analysis.get("packages")
+        if pkg_info:
+            os_name = pkg_info.get("os", "unknown")
+            count = len(pkg_info.get("packages", []))
+            parts.append(f"{container_name}: {os_name}, {count} packages")
+        if analysis.get("declared_ports"):
+            ports = ",".join(str(p) for p in analysis["declared_ports"])
+            parts.append(f"ports={ports}")
+        if analysis.get("entrypoint"):
+            ep = analysis["entrypoint"]
+            parts.append(f"entrypoint={ep[0] if ep else '?'}")
+    return " | ".join(parts) if parts else "image-layer analysis only"
 
 
 def _extract_config_paths_from_cmdline(ps_output: str) -> list[str]:

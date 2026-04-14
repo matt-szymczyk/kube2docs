@@ -95,7 +95,7 @@ class WorkloadProfile(BaseModel):
     workload_type: str
     explored_at: datetime
     confidence: float = 0.0
-    inspection_source: Literal["survey", "deep_inspect", "agentic"] = "survey"
+    inspection_source: Literal["survey", "deep_inspect", "image_inspect", "agentic"] = "survey"
     containers: list[ContainerInfo]
     init_containers: list[ContainerInfo] = Field(default_factory=list)
     image_fingerprint: dict[str, str] = Field(default_factory=dict)
@@ -117,6 +117,9 @@ class WorkloadProfile(BaseModel):
     resilience: ResilienceInfo = Field(default_factory=ResilienceInfo)
     failure_modes: list[FailureMode] = Field(default_factory=list)
     rbac: RbacSummary | None = None
+    # Per-container image-layer analysis results, keyed by container name.
+    # Populated when kubectl exec fails (e.g. distroless images).
+    image_analysis: dict[str, Any] = Field(default_factory=dict)
     summary: str | None = None
 
 
