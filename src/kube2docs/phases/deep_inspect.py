@@ -228,6 +228,7 @@ def run_deep_inspect(
                 profile.confidence = 0.5
                 profile.inspection_source = "image_inspect"
                 profile.explored_at = datetime.now(UTC)
+                store.write_model(store.namespace_dir(ns) / f"{name}.profile.json", profile)
                 tracker.item(f"{ns}/{name}", _summarize_image_analysis(profile))
             else:
                 tracker.warning(f"{ns}/{name}: no exec or image analysis succeeded")
