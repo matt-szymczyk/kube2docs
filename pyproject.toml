@@ -1,6 +1,6 @@
 [project]
 name = "kube2docs"
-version = "0.1.2"
+version = "0.2.0"
 description = "Crawl a Kubernetes cluster and produce structured operational knowledge"
 readme = "README.md"
 license = { text = "MIT" }

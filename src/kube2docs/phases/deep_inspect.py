@@ -371,6 +371,8 @@ def _enrich_profile(
                 port=e["port"],
                 protocol=e.get("protocol", "TCP"),
                 purpose=e.get("process"),
+                evidence=f"ss -tln LISTEN :{e['port']}",
+                verified=True,
             ),
         )
 
@@ -396,6 +398,8 @@ def _enrich_profile(
             constructor=lambda e: OutboundConnection(
                 destination=_conn_dest(e),
                 protocol=e.get("protocol_guess", "TCP"),
+                evidence=f"ss -tn ESTABLISHED {_conn_dest(e)}",
+                verified=True,
             ),
         )
 

@@ -388,7 +388,13 @@ def apply_image_analysis(profile: WorkloadProfile, container_name: str, analysis
     for port in analysis.get("declared_ports", []):
         if port not in existing_ports:
             profile.network_listeners.append(
-                NetworkListener(port=port, protocol="TCP", purpose="declared in image config")
+                NetworkListener(
+                    port=port,
+                    protocol="TCP",
+                    purpose="declared in image config",
+                    evidence=f"image EXPOSE {port} (may be overridden by container args)",
+                    verified=False,
+                )
             )
             existing_ports.add(port)
 

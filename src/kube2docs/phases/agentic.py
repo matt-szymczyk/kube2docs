@@ -123,8 +123,15 @@ Respond ONLY with a JSON object. Two response types:
 {
   "done": true,
   "profile_updates": {
-    "network_listeners": [{"port": 8080, "protocol": "HTTP", "purpose": "API server"}],
-    "outbound_connections": [{"destination": "postgres.default:5432", "protocol": "PostgreSQL"}],
+    "network_listeners": [
+      {"port": 8080, "protocol": "HTTP", "purpose": "API server",
+       "evidence": "ss -tln: LISTEN 0 128 *:8080", "verified": true}
+    ],
+    "outbound_connections": [
+      {"destination": "postgres.default:5432", "protocol": "PostgreSQL",
+       "evidence": "ss -tn ESTAB → 10.0.0.5:5432 (matched service postgres.default)",
+       "verified": true}
+    ],
     "config_files": [{"path": "/etc/nginx/nginx.conf", "format": "nginx", "key_fields": ["upstream", "server"]}]
   },
   "summary": "One-paragraph description of what this workload does"
@@ -145,26 +152,44 @@ account token), or install packages (apt/yum/apk/pip/npm install)
 - If a container has no shell, skip it and try others
 - Keep commands efficient — prefer targeted reads over broad exploration
 
-DEPENDENCY EXTRACTION (critical — this is the main value of this scan):
+EVIDENCE AND VERIFICATION (STRICT — this prevents hallucination):
+Every network_listeners and outbound_connections entry MUST include an \
+`evidence` field and a `verified` boolean. No exceptions.
+
+- `evidence` must quote the SPECIFIC line from a command output you ran this \
+session that proves the fact. Paraphrased or empty evidence = the entry is \
+rejected. Example: "ss -tln: LISTEN 0 128 *:8080 users:((http-echo,pid=1))".
+- `verified: true` is allowed ONLY when the evidence comes from a live \
+runtime observation: ss/netstat/lsof output, /proc/net/tcp, /proc/<pid>/*, \
+ps output, or a successful localhost curl probe.
+- `verified: false` is required when the evidence is indirect: a config file \
+reference, an env var name, a command-line flag, an image EXPOSE directive. \
+These are still useful but must NOT be presented as confirmed facts.
+- If you cannot find evidence for a claim, OMIT IT. Do not guess. A shorter \
+but truthful profile is better than a fuller but speculative one.
+- Do not set verified=true for anything read from a config file or \
+derived from env var naming alone (e.g. DATABASE_URL → postgres). That's \
+verified=false with evidence quoting the config line or env entry.
+
+DEPENDENCY EXTRACTION:
 - When you read a config file, scan it for references to OTHER services: \
 hostnames, connection strings, upstream blocks, proxy_pass, DATABASE_URL, \
 service DNS names like "postgres.app-team", "redis:6379", etc.
-- Every such reference MUST become an entry in outbound_connections. Do not \
-just mention them in the summary — they belong in the structured field.
+- Such references become outbound_connections entries with \
+`verified: false` and evidence quoting the config line/env entry.
 - Prefer the format "service_name.namespace:port" for destinations (matches \
 Kubernetes DNS). If you only know an IP, use "ip:port". If external, use \
 the hostname.
-- Also extract dependencies from: env var values you see in /proc/1/environ \
-or ps output, nginx upstream/proxy_pass blocks, database connection strings, \
-Redis/Kafka broker lists, SMTP hosts.
-- If a command-line flag reveals another service (e.g. --db-host=postgres), \
-that's a dependency — add it.
+- Only set verified=true for a destination if you actually saw a live \
+socket to it (ss -tn ESTABLISHED, /proc/net/tcp).
 
 RESPONSE FORMAT:
 - In profile_updates, use ONLY these field names: network_listeners, \
 outbound_connections, config_files, env_vars
-- network_listeners: [{"port": int, "protocol": str, "purpose": str}]
-- outbound_connections: [{"destination": "name.ns:port", "protocol": str}]
+- network_listeners: [{"port": int, "protocol": str, "purpose": str, \
+"evidence": str, "verified": bool}]
+- outbound_connections: [{"destination": "name.ns:port", "protocol": str, \
+"evidence": str, "verified": bool}]
 - config_files: [{"path": str, "format": str, "key_fields": [str]}]
 - env_vars: [{"name": str, "value": str, "source": str}]
 """
@@ -477,9 +502,24 @@ def _validate_profile_updates(response: dict[str, Any]) -> str | None:
     for nl in updates.get("network_listeners", []):
         if not isinstance(nl, dict) or "port" not in nl:
             return "Each network_listeners entry must be an object with at least a 'port' field"
+        if not (nl.get("evidence") or "").strip():
+            return (
+                f"network_listeners entry for port {nl.get('port')} is missing 'evidence'. "
+                "Every listener MUST quote the specific command output that proved it. "
+                "Set verified=true only if the evidence is from ss/netstat/proc. "
+                "If you have no evidence, omit the entry."
+            )
     for oc in updates.get("outbound_connections", []):
         if not isinstance(oc, dict) or "destination" not in oc:
             return "Each outbound_connections entry must be an object with at least a 'destination' field"
+        if not (oc.get("evidence") or "").strip():
+            return (
+                f"outbound_connections entry for '{oc.get('destination')}' is missing 'evidence'. "
+                "Every connection MUST quote the command output that proved it. "
+                "Set verified=true only if from ss ESTAB/proc-net-tcp. "
+                "Env-var or config references require verified=false. "
+                "If you have no evidence, omit the entry."
+            )
 
     return None
 
@@ -495,32 +535,50 @@ def _apply_profile_updates(
     if not updates:
         return
 
-    # Network listeners
+    # Network listeners — require evidence, drop otherwise to prevent hallucination.
     for nl_data in updates.get("network_listeners", []):
         try:
             port = nl_data.get("port")
-            if port and not any(nl.port == port for nl in profile.network_listeners):
-                profile.network_listeners.append(
-                    NetworkListener(
-                        port=port,
-                        protocol=nl_data.get("protocol", "TCP"),
-                        purpose=nl_data.get("purpose"),
-                    )
+            evidence = (nl_data.get("evidence") or "").strip()
+            if not port:
+                continue
+            if not evidence:
+                logger.info("Dropping LLM network_listener without evidence: port=%s", port)
+                continue
+            if any(nl.port == port for nl in profile.network_listeners):
+                continue
+            profile.network_listeners.append(
+                NetworkListener(
+                    port=port,
+                    protocol=nl_data.get("protocol", "TCP"),
+                    purpose=nl_data.get("purpose"),
+                    evidence=evidence,
+                    verified=bool(nl_data.get("verified", False)),
                 )
+            )
         except (ValueError, TypeError):
             logger.debug("Skipping invalid network listener from LLM: %s", nl_data)
 
-    # Outbound connections
+    # Outbound connections — require evidence, drop otherwise.
     for conn_data in updates.get("outbound_connections", []):
         try:
             dest = conn_data.get("destination", "")
-            if dest and not any(oc.destination == dest for oc in profile.outbound_connections):
-                profile.outbound_connections.append(
-                    OutboundConnection(
-                        destination=dest,
-                        protocol=conn_data.get("protocol", "TCP"),
-                    )
+            evidence = (conn_data.get("evidence") or "").strip()
+            if not dest:
+                continue
+            if not evidence:
+                logger.info("Dropping LLM outbound_connection without evidence: dest=%s", dest)
+                continue
+            if any(oc.destination == dest for oc in profile.outbound_connections):
+                continue
+            profile.outbound_connections.append(
+                OutboundConnection(
+                    destination=dest,
+                    protocol=conn_data.get("protocol", "TCP"),
+                    evidence=evidence,
+                    verified=bool(conn_data.get("verified", False)),
                 )
+            )
         except (ValueError, TypeError):
             logger.debug("Skipping invalid outbound connection from LLM: %s", conn_data)
 

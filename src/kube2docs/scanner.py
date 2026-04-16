@@ -235,6 +235,12 @@ def _merge_outbound_connections(store: KnowledgeStore, tracker: ProgressTracker)
     # Build a set of known cluster workloads ("namespace/name") so we can
     # tell internal dependencies from external hostnames.
     cluster_workloads = {f"{p.namespace}/{p.name}" for p in profiles}
+    # Also map bare workload names to their namespace, so an LLM-supplied
+    # bare hostname like "web-api" resolves to "app-team/web-api" rather
+    # than being misclassified as external.
+    bare_name_to_ns: dict[str, str] = {}
+    for p in profiles:
+        bare_name_to_ns.setdefault(p.name, p.namespace)
 
     new_count = 0
     skipped_platform = 0
@@ -244,6 +250,10 @@ def _merge_outbound_connections(store: KnowledgeStore, tracker: ProgressTracker)
             dest, port = _parse_connection_destination(conn.destination, ip_to_service)
             if not dest or port == 0:
                 continue
+            # Promote bare workload names ("web-api") to "namespace/name" when
+            # we can unambiguously identify the namespace from the workload map.
+            if "/" not in dest and dest in bare_name_to_ns:
+                dest = f"{bare_name_to_ns[dest]}/{dest}"
             # Skip self-references
             if dest == source:
                 continue
@@ -264,6 +274,8 @@ def _merge_outbound_connections(store: KnowledgeStore, tracker: ProgressTracker)
                         protocol=conn.protocol,
                         critical=conn.critical,
                         external=is_external,
+                        evidence=conn.evidence,
+                        verified=conn.verified,
                     )
                 )
                 new_count += 1

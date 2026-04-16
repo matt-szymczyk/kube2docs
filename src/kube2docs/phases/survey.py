@@ -964,6 +964,11 @@ def _build_dependency_graph(
                                     destination=dest,
                                     port=port_info["port"],
                                     protocol=_guess_protocol(port_info["port"], port_info.get("name", "")),
+                                    evidence=(
+                                        f"env var '{env.name}' name matches service '{svc_name}' "
+                                        "(not observed in live sockets)"
+                                    ),
+                                    verified=False,
                                 )
                             )
 

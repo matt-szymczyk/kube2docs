@@ -18,6 +18,12 @@ class NetworkListener(BaseModel):
     protocol: str
     purpose: str | None = None
     detected_endpoints: list[str] = Field(default_factory=list)
+    # Evidence and verification status. verified=True means this was observed
+    # at runtime (ss/netstat/proc/net/tcp). verified=False means it was
+    # declared somewhere (image EXPOSE, config file) but not observed live.
+    # Writers must label unverified entries distinctly — not as facts.
+    evidence: str | None = None
+    verified: bool = False
 
 
 class OutboundConnection(BaseModel):
@@ -25,6 +31,10 @@ class OutboundConnection(BaseModel):
     protocol: str
     critical: bool | None = None
     failure_behavior: str | None = None
+    # Same semantics as NetworkListener. verified=True ⇒ observed in a live
+    # socket (ss -tn/ESTABLISHED). verified=False ⇒ referenced in config/env.
+    evidence: str | None = None
+    verified: bool = False
 
 
 class EnvVar(BaseModel):
@@ -130,6 +140,12 @@ class DependencyEdge(BaseModel):
     protocol: str
     critical: bool | None = None
     external: bool = False
+    # Same epistemic semantics as NetworkListener/OutboundConnection.
+    # verified=True means the edge was observed in a live socket
+    # (ss ESTABLISHED, /proc/net/tcp). verified=False means it was inferred
+    # from env var naming patterns or config file references.
+    evidence: str | None = None
+    verified: bool = False
 
 
 class ClusterOverview(BaseModel):

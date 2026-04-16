@@ -217,11 +217,47 @@ class TestValidateProfileUpdates:
         response = {
             "done": True,
             "profile_updates": {
-                "network_listeners": [{"port": 8080, "protocol": "HTTP"}],
-                "outbound_connections": [{"destination": "db.app:5432", "protocol": "PostgreSQL"}],
+                "network_listeners": [
+                    {
+                        "port": 8080,
+                        "protocol": "HTTP",
+                        "evidence": "ss -tln: LISTEN 0 128 *:8080",
+                        "verified": True,
+                    }
+                ],
+                "outbound_connections": [
+                    {
+                        "destination": "db.app:5432",
+                        "protocol": "PostgreSQL",
+                        "evidence": "ss -tn ESTAB 10.0.0.1:53122 10.0.0.5:5432",
+                        "verified": True,
+                    }
+                ],
             },
         }
         assert _validate_profile_updates(response) is None
+
+    def test_listener_without_evidence_rejected(self) -> None:
+        response = {
+            "done": True,
+            "profile_updates": {
+                "network_listeners": [{"port": 8080, "protocol": "HTTP"}],
+            },
+        }
+        err = _validate_profile_updates(response)
+        assert err is not None
+        assert "evidence" in err
+
+    def test_outbound_without_evidence_rejected(self) -> None:
+        response = {
+            "done": True,
+            "profile_updates": {
+                "outbound_connections": [{"destination": "db.app:5432", "protocol": "PostgreSQL"}],
+            },
+        }
+        err = _validate_profile_updates(response)
+        assert err is not None
+        assert "evidence" in err
 
     def test_unknown_field_detected(self) -> None:
         # LLM uses "ports" instead of "network_listeners"

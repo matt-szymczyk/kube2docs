@@ -32,6 +32,23 @@ Rules:
 - Use Markdown headers, bullet lists, and tables for readability.
 - Do NOT repeat raw JSON — summarize and interpret it.
 - Do NOT include recommendations, suggestions, or "you should" language.
+
+VERIFIED vs UNVERIFIED FACTS (critical):
+- Entries in network_listeners, outbound_connections, and dependency edges \
+have a `verified` boolean and an `evidence` string.
+- verified=true entries were observed at runtime (ss/netstat/proc). Present \
+them as confirmed facts.
+- verified=false entries are declared/referenced (image EXPOSE, config file \
+reference, env var name pattern) — they may not reflect runtime behavior.
+- In tables, add a "Verified" column or mark unverified entries with \
+"(declared — may be overridden)" or "(referenced in config — not observed)" \
+or "(inferred from env var name)".
+- NEVER present a verified=false listener, connection, or dependency as a \
+plain fact. A reader must be able to tell at a glance which is which.
+- Do not invent facts beyond what the JSON contains. If a port is listed as \
+unverified, say so; do not assert the workload "listens on X" as if certain.
+- If ALL entries for a given section are unverified, say so explicitly: \
+"The following dependencies are inferred, not observed at runtime".
 """
 
 SYSTEM_PROMPT_REC = """\
@@ -395,8 +412,14 @@ def _build_workload_summary(profiles: list[WorkloadProfile]) -> list[dict[str, A
                 "type": p.workload_type,
                 "replicas": p.replicas,
                 "language": proc.get("language", "unknown"),
-                "ports": [nl.port for nl in p.network_listeners],
-                "connections": [oc.destination for oc in p.outbound_connections],
+                "ports": [
+                    {"port": nl.port, "verified": nl.verified, "evidence": nl.evidence}
+                    for nl in p.network_listeners
+                ],
+                "connections": [
+                    {"destination": oc.destination, "verified": oc.verified, "evidence": oc.evidence}
+                    for oc in p.outbound_connections
+                ],
                 "has_health_check": bool(p.health),
                 "has_pdb": p.resilience.pod_disruption_budget,
                 "confidence": p.confidence,
